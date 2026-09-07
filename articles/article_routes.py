@@ -14,7 +14,7 @@ GET  /api/disambiguate                       → typeahead search
 import logging
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -263,6 +263,56 @@ def _link_unlinked_sentences(db: Session, article: dict):
 
 
 
+def _onchain_normalize(text: str) -> bytes:
+    """Byte-exact port of PostRegistry._normalizeBytes: collapse ASCII
+    whitespace runs to one 0x20, lowercase ASCII A-Z only, trim a trailing
+    space. Unicode passes through untouched, exactly as on-chain."""
+    raw = text.encode("utf-8")
+    buf = bytearray()
+    last_space = True
+    for b in raw:
+        if b in (0x20, 0x09, 0x0A, 0x0D):
+            if not last_space:
+                buf.append(0x20); last_space = True
+            continue
+        if 0x41 <= b <= 0x5A:
+            b += 32
+        buf.append(b); last_space = False
+    if buf and buf[-1] == 0x20:
+        buf.pop()
+    return bytes(buf)
+
+
+def _require_sentence_matches_chain(db: Session, sentence_id: int, post_id: int) -> None:
+    """M4: refuse to link unless the sentence text equals the on-chain claim text
+    under the registry's own normalization. 404 unknown sentence, 409 not yet
+    indexed/readable, 422 mismatch."""
+    row = db.execute(sql_text("SELECT text FROM article_sentence WHERE sentence_id = :sid"),
+                     {"sid": sentence_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "Unknown sentence")
+    sentence_text = row[0] or ""
+    chain_text = None
+    try:
+        r = db.execute(sql_text("SELECT claim_text FROM chain_claim_text WHERE post_id = :p"),
+                       {"p": post_id}).fetchone()
+        if r and r[0] is not None:
+            chain_text = r[0]
+    except Exception:
+        chain_text = None
+    if chain_text is None:
+        # indexer lag right after creation: read the registry directly
+        try:
+            from chain.registry_reader import get_claim_text
+            chain_text = get_claim_text(post_id)
+        except Exception:
+            chain_text = None
+    if chain_text is None:
+        raise HTTPException(409, "Claim not yet indexed; retry shortly")
+    if _onchain_normalize(sentence_text) != _onchain_normalize(chain_text):
+        raise HTTPException(422, "Sentence text does not match the on-chain claim text")
+
+
 def _increment_view_count(db: Session, article_id: int):
     """Increment the view counter for an article. Non-fatal."""
     try:
@@ -362,8 +412,11 @@ def get_article(topic: str, db: Session = Depends(get_db)):
 
 @router.post("/article/{topic}/generate")
 @ai_rate_limit
-def generate_article_endpoint(topic: str, req: GenerateRequest,
+def generate_article_endpoint(topic: str, req: GenerateRequest, request: Request,
                               db: Session = Depends(get_db)):
+    # M5 (security review 2026-09): without `request` in the signature the
+    # decorator could not find a client IP and every caller shared one global
+    # "ai:unknown" bucket — one client could lock out AI features for all.
     """Generate (or regenerate) an article for a topic."""
     return _generate_and_store(topic, db, refresh=req.refresh)
 
@@ -616,9 +669,18 @@ class LinkPostRequest(BaseModel):
 @router.post("/article/sentence/{sentence_id}/link_post")
 def link_post_endpoint(sentence_id: int, req: LinkPostRequest,
                        db: Session = Depends(get_db)):
-    """Link a sentence to its on-chain post_id after client-side registration."""
+    """Link a sentence to its on-chain post_id after client-side registration.
+
+    M4 (security review 2026-09): this endpoint is unauthenticated by design
+    (any reader may curate), so the INVARIANT it must uphold is that a score is
+    never rendered next to text that is not the on-chain claim. The link is
+    accepted only if the sentence text, normalized exactly as PostRegistry
+    normalizes it, matches the indexed on-chain claim text (falling back to a
+    live getClaim() read while the indexer catches up).
+    """
     from articles.article_store import ensure_tables, update_sentence_post_id
     ensure_tables(db)
+    _require_sentence_matches_chain(db, sentence_id, req.post_id)
     update_sentence_post_id(db, sentence_id, req.post_id)
     _invalidate_and_rebuild(db, sentence_id)
 
@@ -647,7 +709,8 @@ def link_post_endpoint(sentence_id: int, req: LinkPostRequest,
 
 @router.post("/article/sentence/cleanup")
 @ai_rate_limit
-def cleanup_sentence_endpoint(req: CleanupRequest):
+def cleanup_sentence_endpoint(req: CleanupRequest, request: Request):
+    # M5: see generate_article_endpoint.
     """AI grammar/spelling cleanup. Returns original + suggested."""
     from articles.article_gen import cleanup_sentence
     original = req.text.strip()

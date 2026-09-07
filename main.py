@@ -248,7 +248,9 @@ def require_admin(request, db=None, action=None, params=None):
             raise HTTPException(403, "Admin access denied from this IP.")
 
     key = request.headers.get("X-Admin-Key", "")
-    if key != ADMIN_API_KEY:
+    # security review 2026-09 (Low): constant-time compare
+    import hmac as _hmac
+    if not _hmac.compare_digest(key.encode(), ADMIN_API_KEY.encode()):
         raise HTTPException(403, "Invalid admin key")
 
     # Audit log
@@ -582,8 +584,10 @@ def token_balance(address: str):
 
 
 @app.post("/api/reindex/{post_id}")
-def reindex_post(post_id: int, user: str = None):
-    """Trigger immediate reindex of a post, user stakes, and invalidate article cache."""
+def reindex_post(post_id: int, request: Request, user: str = None):
+    """Trigger immediate reindex of a post, user stakes, and invalidate article cache.
+    security review 2026-09 (Low): admin-gated — this burns RPC on demand."""
+    require_admin(request, action="reindex", params={"post_id": post_id, "user": user})
     # patch_session_leak_main_reindex: db.close() was after the work, so
     # any exception in index_post/execute/commit would skip the close
     # and leak the session until the postgres idle-tx timeout (5min)

@@ -123,6 +123,7 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
     error MinFeeWeiTooHigh(uint256 got, uint256 max);
     error TreasuryIsForwarder();
     error NotAContract(address token); // v3
+    error BatchMustBeAtomic(); // v4 (C1)
     error UnknownSelector(bytes4 sel);
     error Reentrant();
 
@@ -304,14 +305,22 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
         override
         nonReentrant
     {
-        // Collect fee for each request BEFORE delegating. The selector
-        // check inside _collectFee/_extractTxValue means an invalid
-        // selector reverts the entire batch atomically — even with a
-        // refundReceiver — which is the correct behavior for the
-        // protocol-only gate. (Per OZ executeBatch semantics, a
-        // refundReceiver makes individual *signature* invalidity
-        // skip-and-refund, but it does not catch reverts from
-        // pre-batch logic like ours.)
+        // v4 — C1 (security review 2026-09): the previous version pulled every
+        // request's fee BEFORE OZ validated signatures, and OZ's executeBatch
+        // with a non-zero refundReceiver SKIPS invalid-signature requests
+        // instead of reverting — so a forged request's fee transferFrom stuck.
+        // Because the fee is derived from attacker-controlled calldata, that
+        // was an unauthenticated drain of any user's allowance (min(balance,
+        // permit) per victim per batch). Two independent guards now:
+        // The fix: batches are forced ATOMIC (refundReceiver == 0). In atomic
+        // mode OZ validates each request immediately before executing it and
+        // REVERTS THE WHOLE TRANSACTION on any invalid one — so every fee
+        // pull below is unwound together with the forged request, and the
+        // calldata a surviving fee was computed from is, by construction,
+        // signed calldata. (Pre-validating all requests up front is NOT an
+        // option: a legitimate batch of two requests from one signer carries
+        // nonces N and N+1, and N+1 cannot validate until N has executed.)
+        if (refundReceiver != address(0)) revert BatchMustBeAtomic();
         for (uint256 i; i < requests.length; ++i) {
             _collectFee(requests[i].from, requests[i].data);
         }
