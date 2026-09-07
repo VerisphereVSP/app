@@ -17,8 +17,10 @@ import "../VerisphereForwarder.sol";
 contract MigrateForwarderToken is Script {
     function run() external {
         if (block.chainid == 43114) {
-            require(vm.envOr("MAINNET_UPGRADE_CONFIRM", uint256(0)) == 1,
-                "MigrateForwarderToken: mainnet requires MAINNET_UPGRADE_CONFIRM=1");
+            require(
+                vm.envOr("MAINNET_UPGRADE_CONFIRM", uint256(0)) == 1,
+                "MigrateForwarderToken: mainnet requires MAINNET_UPGRADE_CONFIRM=1"
+            );
         }
         uint256 pk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address sender = vm.addr(pk);
@@ -39,10 +41,7 @@ contract MigrateForwarderToken is Script {
             console.log("fee token already current - SKIP upgrade");
         } else {
             VerisphereForwarder impl = new VerisphereForwarder();
-            fw.upgradeToAndCall(
-                address(impl),
-                abi.encodeCall(VerisphereForwarder.setVspToken, (newToken))
-            );
+            fw.upgradeToAndCall(address(impl), abi.encodeCall(VerisphereForwarder.setVspToken, (newToken)));
             console.log("upgraded to v3 impl:", address(impl));
         }
         if (newTreasury != address(0) && fw.treasury() != newTreasury) {

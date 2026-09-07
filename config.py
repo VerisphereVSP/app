@@ -136,6 +136,11 @@ VENUE_ROUTER = os.getenv("VENUE_ROUTER", "").strip()
 # loop and the MM-model metrics (floor/sell/buy) stop. Flipped in
 # env/network.fuji.env at Phase 4 — this code is inert until then.
 MM_ROUTES_ENABLED = os.getenv("MM_ROUTES_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+# security review 2026-09 (Informational): MM buy/sell/execute-permit are fully
+# open when SERVICE_API_TOKEN is unset. Fine on a testnet trade surface; on
+# mainnet that is a fail-open config, so refuse to start.
+if MM_ROUTES_ENABLED and CHAIN_ID == 43114 and not os.getenv("SERVICE_API_TOKEN", "").strip():
+    raise RuntimeError("MM_ROUTES_ENABLED on mainnet requires SERVICE_API_TOKEN (fail-closed)")
 VSP_ADDRESS = VSP_TOKEN_ADDRESS
 
 # Market maker wallet (reserves — backs outstanding VSP)
