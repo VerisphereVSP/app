@@ -9,7 +9,7 @@ import logging
 import os  # patch_postreview_memo_dark
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from web3 import Web3
@@ -234,6 +234,22 @@ class RelayRequest(BaseModel):
     signature: str
     permit: PermitPayload | None = None
     fee_permit: PermitPayload | None = None  # Permit granting Forwarder VSP allowance for relay fee
+
+
+def _relay_targets() -> set[str]:
+    """F-1: the only contracts the relay will forward to. Anything else — in
+    particular an attacker's own contract that answers isTrustedForwarder —
+    is refused before any gas is spent."""
+    from config import POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, LINK_GRAPH_ADDRESS
+    return {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, LINK_GRAPH_ADDRESS) if a}
+
+
+def _reject_value_and_unknown_target(body: "RelayRequest") -> None:
+    req = body.request
+    if int(req.value or 0) != 0:
+        raise HTTPException(400, "Relay requests must carry value 0: the protocol takes no native value")
+    if (req.to or "").lower() not in _relay_targets():
+        raise HTTPException(400, "Relay target is not a protocol contract")
 
 
 class NonceResponse(BaseModel):
@@ -506,7 +522,8 @@ async def estimate_fee(to: str, calldata: str, db: Session = Depends(get_db)):
 
 @router.post("/api/relay/async")
 @relay_rate_limit
-async def relay_async(body: RelayRequest, db: Session = Depends(get_db)):
+async def relay_async(body: RelayRequest, request: Request, db: Session = Depends(get_db)):
+    _reject_value_and_unknown_target(body)  # F-1
     """Async relay: submit tx, record tx_log row, return immediately."""
     import asyncio
     return await asyncio.to_thread(_relay_async_sync, body, db)
@@ -657,9 +674,12 @@ def _relay_async_sync(body: RelayRequest, db: Session):
                 f'allowance {user_allowance / 1e18:.4f}. Sign a fee permit.')
 
         # Build, sign, submit
+        # F-1 (private disclosure 2026-09): NEVER forward native value from the
+        # relayer wallet — the protocol takes none from users. Belt: value is
+        # rejected at request validation; braces: it is pinned to 0 here too.
         tx = fwd.functions.execute(request_data).build_transaction({
             "from": _relay_account.address,  # patch_bundle10_relay_key_separation
-            "value": req.value,
+            "value": 0,
             "gas":   req.gas + 800_000,
         })
         # patch_bundle04_6_relay_revert_catch: catch on-chain revert so tx_log still records the hash.
