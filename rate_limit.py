@@ -424,6 +424,14 @@ def relay_rate_limit(func):
         body = kwargs.get("body")
         request = kwargs.get("request")
 
+        # F-1 (private disclosure 2026-09): the per-address bucket resets with a
+        # fresh EOA, so add a per-IP bucket the attacker cannot reset for free.
+        _req = kwargs.get("request") or next((a for a in args if hasattr(a, "client")), None)
+        _ip = getattr(getattr(_req, "client", None), "host", None) or "unknown"
+        _ok, _ = _limiter.check(f"relay-ip:{_ip}", RELAY_RATE_LIMIT, RELAY_RATE_WINDOW)
+        if not _ok:
+            logger.warning("Relay rate limit exceeded for IP %s", _ip)
+            raise HTTPException(429, "Too many relay requests from this network address.")
         # Per-address rate limit
         if body and hasattr(body, "request") and hasattr(body.request, "from_"):
             addr = body.request.from_.lower()

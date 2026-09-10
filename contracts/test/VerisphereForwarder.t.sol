@@ -91,6 +91,8 @@ contract VerisphereForwarderTest is Test {
         fwd = VerisphereForwarder(payable(address(proxy)));
 
         target = new MockTarget(address(fwd));
+        vm.prank(deployer);
+        fwd.setAllowedTarget(address(target), true); // v5 (F-1): only allow-listed targets
 
         // User pre-approves forwarder for fees
         vm.prank(user);
@@ -437,5 +439,40 @@ contract VerisphereForwarderTest is Test {
         );
         uint256 fee = fwd.estimateFee(data);
         assertEq(fee, INITIAL_MIN_FEE);
+    }
+
+    // ── F-1 (private disclosure 2026-09): relayer-paid native value drain ──
+    // The relay pays request.value from its OWN wallet and OZ requires
+    // msg.value == request.value, so an attacker-signed request with a non-zero
+    // value and an attacker-chosen `to` drained the relayer EOA. v5 rejects
+    // both at the contract layer. PASS == fixed.
+
+    function test_F1_relayerNeverPaysNativeValue() public {
+        bytes memory stakeData = abi.encodeWithSelector(MockTarget.stake.selector, 1, 0, 10e18);
+        VerisphereForwarder.ForwardRequestData memory r = _buildRequest(address(target), stakeData, 0);
+        r.value = 0.5 ether; // attacker-chosen value
+        r.signature = _sign(r, 0);
+        address relayer = address(0x5E1A);
+        vm.deal(relayer, 1 ether);
+        uint256 before = relayer.balance;
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(VerisphereForwarder.ValueNotAllowed.selector, 0.5 ether));
+        fwd.execute{value: 0.5 ether}(r);
+        assertEq(relayer.balance, before, "relayer balance untouched");
+    }
+
+    function test_F1_unknownTargetRefused() public {
+        MockTarget evil = new MockTarget(address(fwd)); // answers isTrustedForwarder, NOT allow-listed
+        bytes memory stakeData = abi.encodeWithSelector(MockTarget.stake.selector, 1, 0, 10e18);
+        VerisphereForwarder.ForwardRequestData memory r = _buildRequest(address(evil), stakeData, 0);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(VerisphereForwarder.TargetNotAllowed.selector, address(evil)));
+        fwd.execute(r);
+    }
+
+    function test_F1_allowlistIsOwnerOnly() public {
+        vm.prank(attacker);
+        vm.expectRevert(VerisphereForwarder.NotOwner.selector);
+        fwd.setAllowedTarget(attacker, true);
     }
 }

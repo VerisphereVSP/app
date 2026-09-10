@@ -78,6 +78,13 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
     bool private _initialized;
     uint256 private _entered; // v2: nonReentrant guard (1 = entered, 0 = not)
     address public pendingOwner; // v2: Ownable2Step
+    /// v5 (F-1, private disclosure 2026-09): the relay pays `request.value`
+    /// from ITS OWN wallet and OZ requires msg.value == request.value, so an
+    /// attacker-signed request with a non-zero value and an attacker-chosen
+    /// `to` drained the relayer EOA. The protocol takes no native value from
+    /// users and has exactly three mutating targets. Both invariants now live
+    /// in the contract, where they survive backend rewrites.
+    mapping(address => bool) public allowedTarget; // v5, storage appended (slot 11)
     uint256[50] private __gap; // v2: storage gap
 
     // ── Constants ────────────────────────────────────────────
@@ -124,6 +131,9 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
     error TreasuryIsForwarder();
     error NotAContract(address token); // v3
     error BatchMustBeAtomic(); // v4 (C1)
+    error ValueNotAllowed(uint256 value); // v5 (F-1)
+    error TargetNotAllowed(address to); // v5 (F-1)
+    event AllowedTargetSet(address indexed target, bool allowed); // v5
     error UnknownSelector(bytes4 sel);
     error Reentrant();
 
@@ -291,8 +301,22 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
     // ── Execute overrides ────────────────────────────────────
 
     function execute(ForwardRequestData calldata request) public payable override nonReentrant {
+        _checkTarget(request); // v5 (F-1)
         _collectFee(request.from, request.data);
         super.execute(request);
+    }
+
+    /// @dev v5 (F-1): no native value ever, and only allow-listed protocol targets.
+    function _checkTarget(ForwardRequestData calldata request) internal view {
+        if (request.value != 0) revert ValueNotAllowed(request.value);
+        if (!allowedTarget[request.to]) revert TargetNotAllowed(request.to);
+    }
+
+    /// @notice v5: owner-managed target allowlist (the deployed protocol contracts).
+    function setAllowedTarget(address target, bool allowed) external onlyOwner {
+        if (target == address(0)) revert ZeroAddress();
+        allowedTarget[target] = allowed;
+        emit AllowedTargetSet(target, allowed);
     }
 
     /// @notice Override of executeBatch to enforce per-request fee
@@ -322,6 +346,7 @@ contract VerisphereForwarder is Initializable, ERC2771Forwarder, UUPSUpgradeable
         // nonces N and N+1, and N+1 cannot validate until N has executed.)
         if (refundReceiver != address(0)) revert BatchMustBeAtomic();
         for (uint256 i; i < requests.length; ++i) {
+            _checkTarget(requests[i]); // v5 (F-1)
             _collectFee(requests[i].from, requests[i].data);
         }
         super.executeBatch(requests, refundReceiver);
