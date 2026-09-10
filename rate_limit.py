@@ -283,6 +283,51 @@ _last_balance_check = 0.0
 _mm_balance_ok = True
 
 
+# ── Relayer SPEND-RATE circuit breaker (security follow-up 2026-09-10) ──
+# The balance breaker only trips once the wallet is nearly empty; a drain
+# of any shape (known or not) burns the whole float first. This breaker
+# bounds the RATE: relay-paid gas (and any value) is accounted per rolling
+# hour and the relay refuses (503 + alert) when the budget is exceeded.
+import os as _os
+from collections import deque as _deque
+RELAY_SPEND_BUDGET_WEI = int(float(_os.getenv("RELAY_SPEND_BUDGET_AVAX_PER_HOUR", "0.5")) * 1e18)
+_spend_window = _deque()  # (timestamp, wei)
+_spend_alerted_at = 0.0
+
+
+def record_relay_spend(wei: int) -> None:
+    """Call with the real cost (gasUsed * effectiveGasPrice) of every relay-paid tx."""
+    now = time.time()
+    _spend_window.append((now, int(wei)))
+    while _spend_window and _spend_window[0][0] < now - 3600:
+        _spend_window.popleft()
+
+
+def relay_spend_last_hour() -> int:
+    now = time.time()
+    while _spend_window and _spend_window[0][0] < now - 3600:
+        _spend_window.popleft()
+    return sum(w for _, w in _spend_window)
+
+
+def check_relay_spend_budget() -> bool:
+    global _spend_alerted_at
+    spent = relay_spend_last_hour()
+    if spent <= RELAY_SPEND_BUDGET_WEI:
+        return True
+    if time.time() - _spend_alerted_at > 600:
+        _spend_alerted_at = time.time()
+        try:
+            import notify
+            notify.send_alert("relay_spend_breaker",
+                              f"Relay spend {spent / 1e18:.4f} AVAX in the last hour exceeds budget "
+                              f"{RELAY_SPEND_BUDGET_WEI / 1e18:.4f} AVAX — relay paused (503). Investigate before raising RELAY_SPEND_BUDGET_AVAX_PER_HOUR.")
+        except Exception:
+            logger.exception("relay spend breaker: alert failed")
+    logger.error("relay spend breaker tripped: %.4f AVAX/h > budget", spent / 1e18)
+    return False
+
+
 def check_mm_balance() -> bool:
     """Check if the MM wallet has enough AVAX to relay.
     Cached for BALANCE_CHECK_INTERVAL seconds."""
@@ -445,6 +490,9 @@ def relay_rate_limit(func):
                     f"Limit: {RELAY_RATE_LIMIT} per {RELAY_RATE_WINDOW}s.",
                 )
 
+        # Spend-rate circuit breaker (bounds any drain shape by construction)
+        if not check_relay_spend_budget():
+            raise HTTPException(503, "Relay temporarily paused — hourly spend budget exceeded; operator alerted.")
         # Gas budget circuit breaker
         if not check_mm_balance():
             raise HTTPException(
