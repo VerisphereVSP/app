@@ -3,6 +3,7 @@
 # etc. is visible in 'docker compose logs app'. Mirrors worker.py.
 import os  # patch_bundle12_docs_gate
 import logging as _bundle03_logging
+logger = _bundle03_logging.getLogger("main")
 import sys as _bundle03_sys
 _bundle03_logging.basicConfig(
     level=_bundle03_logging.INFO,
@@ -399,8 +400,10 @@ def get_user_stakes_batch(body: dict, db: Session = Depends(get_db)):
     return {"stakes": stakes}
 
 @app.get("/api/claims/{post_id}/debug")
-def debug_claim(post_id: int):
-    """Debug: show raw on-chain data for a claim to verify VS calculation."""
+def debug_claim(post_id: int, request: Request):
+    """Debug: show raw on-chain data for a claim to verify VS calculation.
+    Review 3 (2026-09-10) #7: admin-only — raw RPC/contract detail is not a public surface."""
+    require_admin(request, action="debug_claim", params={"post_id": post_id})
     from chain.chain_reader import get_stake_totals, get_verity_score, _get_score_engine
     result = {}
     try:
@@ -435,6 +438,12 @@ class CreateClaimRequest(BaseModel):
 
 @app.post("/api/claims/create")
 def create_claim_endpoint(req: CreateClaimRequest):
+    # Review 3 (2026-09-10) #1 HIGH: this legacy path signs with the SERVER
+    # wallet on an unauthenticated request. Production claim creation is
+    # user-signed via /api/relay/async only. 404 unless the dev-only direct
+    # signing flag is set (mirrors stake/unstake/links).
+    if not DIRECT_MM_SIGNING_ENABLED:
+        raise HTTPException(404)
     # patch_bundle06_moderation_activation: gate the MM-signed direct claim
     # path too (mirrors the relay createClaim gate).
     from moderation import check_content
@@ -447,7 +456,8 @@ def create_claim_endpoint(req: CreateClaimRequest):
         tx_hash = create_claim(req.text)
         return {"tx_hash": tx_hash}
     except Exception as e:
-        raise HTTPException(500, f"Failed to create claim: {str(e)}")
+        logger.exception("create_claim failed")  # review 3 #7: no internal detail to clients
+        raise HTTPException(500, "claim_creation_failed")
 
 
 class RecordClaimRequest(BaseModel):
@@ -458,7 +468,30 @@ class RecordClaimRequest(BaseModel):
 @app.post("/api/claims/record")
 def record_claim_endpoint(req: RecordClaimRequest, db: Session = Depends(get_db)):
     """Record a claim's on-chain post_id in the local DB.
-    Called by the frontend after a successful on-chain creation."""
+    Called by the frontend after a successful on-chain creation.
+
+    Review 3 (2026-09-10) #2 HIGH: a browser must never tell the database
+    which chain id a claim text maps to. The mapping is accepted only if the
+    registry's claim text for post_id, normalized exactly as on-chain, equals
+    the submitted text (indexed text first, live getClaim() fallback)."""
+    from articles.article_routes import _onchain_normalize
+    chain_text = None
+    try:
+        r = db.execute(sql_text("SELECT claim_text FROM chain_claim_text WHERE post_id = :p"), {"p": int(req.post_id)}).fetchone()
+        if r and r[0] is not None:
+            chain_text = r[0]
+    except Exception:
+        chain_text = None
+    if chain_text is None:
+        try:
+            from chain.registry_reader import get_claim_text
+            chain_text = get_claim_text(int(req.post_id))
+        except Exception:
+            chain_text = None
+    if chain_text is None:
+        raise HTTPException(409, "post not yet indexed; retry shortly")
+    if _onchain_normalize(req.text or "") != _onchain_normalize(chain_text):
+        raise HTTPException(422, "text does not match the on-chain claim for this post_id")
     try:
         db.execute(sql_text(
             "UPDATE claim SET post_id = :pid "
