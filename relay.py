@@ -438,6 +438,11 @@ def _execute_permit(permit):
 
     tx_hash = sign_and_send(tx)
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+    try:  # spend-rate breaker accounting (security follow-up 2026-09-10)
+        from rate_limit import record_relay_spend
+        record_relay_spend(int(receipt["gasUsed"]) * int(receipt.get("effectiveGasPrice", 0) or tx.get("gasPrice", 0) or 0))
+    except Exception:
+        logger.debug("spend accounting skipped", exc_info=True)
     if receipt.status == 0:
         raise HTTPException(400, "Permit transaction reverted on-chain")
     logger.info("Permit executed: token=%s owner=%s spender=%s tx=%s",
@@ -689,6 +694,12 @@ def _relay_async_sync(body: RelayRequest, db: Session):
         try:
             tx_hash = sign_and_send(tx)
             tx_status = "submitted"
+            try:  # spend-rate breaker: the forward tx settles async, so account its WORST-CASE cost now
+                from rate_limit import record_relay_spend
+                _gp = int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
+                record_relay_spend(int(tx.get("gas", 0)) * _gp)
+            except Exception:
+                logger.debug("spend accounting skipped", exc_info=True)
         except TxRevertedError as e:
             tx_hash = e.tx_hash
             tx_status = "reverted"
