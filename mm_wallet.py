@@ -12,19 +12,48 @@ from signing.kms_account import kms_account_from_env  # patch_kms_mm
 
 from chain.provider import w3  # patch_trackb_shared_w3: shared handle owned outside the MM module
 
-account = kms_account_from_env("MM")  # asserts MM_KMS_KEY derives MM_ADDRESS
-
-# receipt_timeout=60 + gas_estimate_fallback=250_000 reproduce the original
-# mm_wallet.sign_and_send behavior exactly. label/logger preserve the original
-# warning text ("sign_and_send: receipt timeout ...") under logger name "mm_wallet".
 import logging as _logging
-sign_and_send = make_sign_and_send(
-    account=account,
-    w3=w3,
-    receipt_timeout=60,
-    gas_estimate_fallback=250_000,
-    logger=_logging.getLogger(__name__),
-    label="sign_and_send",
-)
+
+# patch_phase5: the MM is RETIRED. Its KMS key is being destroyed and its
+# secrets removed; nothing may require them at import time. `w3` stays eager
+# (it is the shared read provider six modules import); `account` and
+# `sign_and_send` resolve lazily and raise a clear error only if some legacy
+# direct-signing path is actually invoked (all such routes are 404-gated).
+# receipt_timeout=60 + gas_estimate_fallback=250_000 reproduce the original
+# behavior exactly; label/logger preserve the original warning text.
+_account = None
+_signer = None
+
+
+def _resolve():
+    global _account, _signer
+    if _account is None:
+        _account = kms_account_from_env("MM")  # asserts MM_KMS_KEY derives MM_ADDRESS
+        _signer = make_sign_and_send(
+            account=_account,
+            w3=w3,
+            receipt_timeout=60,
+            gas_estimate_fallback=250_000,
+            logger=_logging.getLogger(__name__),
+            label="sign_and_send",
+        )
+    return _account, _signer
+
+
+def sign_and_send(tx):
+    """Lazy MM signer. Raises at call time (not import time) if the MM key is gone."""
+    _, signer = _resolve()
+    return signer(tx)
+
+
+class _LazyAccount:
+    """`from mm_wallet import account` stays importable; attribute access resolves the key."""
+
+    def __getattr__(self, name):
+        acct, _ = _resolve()
+        return getattr(acct, name)
+
+
+account = _LazyAccount()
 
 __all__ = ["w3", "account", "sign_and_send", "TxRevertedError"]
