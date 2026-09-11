@@ -338,7 +338,7 @@ def check_mm_balance() -> bool:
         return _mm_balance_ok
 
     try:
-        from mm_wallet import w3
+        from chain.provider import w3
         from config import MM_ADDRESS
         from web3 import Web3
 
