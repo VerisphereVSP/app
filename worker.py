@@ -325,6 +325,45 @@ async def main():
     else:
         print("smax keeper: unconfigured (KEEPER_KMS_KEY/KEEPER_ADDRESS unset) — idle", flush=True)
 
+    # patch_phase5: EMISSION TRIPWIRE (founder ruling 2026-09-10, review-3 #5).
+    # The StakeEngine is exempt from the supply cap by design (it mints staking
+    # rewards at settlement), so the blast-radius control for a compromised or
+    # buggy engine is the guardian PAUSE, which halts settlements — the only
+    # mint path. This loop watches totalSupply and pages the guardian when
+    # 24h net emission exceeds EMISSION_ALERT_VSP_PER_DAY (default 100,000 VSP;
+    # tune to ~2x max APY on staked supply). Read-only; never acts on chain.
+    async def _emission_tripwire():
+        import os as _os, time as _time
+        from collections import deque as _dq
+        from web3 import Web3 as _W3
+        budget = float(_os.getenv("EMISSION_ALERT_VSP_PER_DAY", "100000")) * 1e18
+        hist = _dq()
+        alerted_at = 0.0
+        await asyncio.sleep(120)
+        while True:
+            try:
+                from chain.provider import w3 as _w3
+                from config import VSP_TOKEN_ADDRESS as _vsp
+                tok = _w3.eth.contract(address=_W3.to_checksum_address(_vsp), abi=[{"type":"function","name":"totalSupply","inputs":[],"outputs":[{"type":"uint256"}],"stateMutability":"view"}])
+                now = _time.time(); supply = int(tok.functions.totalSupply().call())
+                hist.append((now, supply))
+                while hist and hist[0][0] < now - 86400:
+                    hist.popleft()
+                delta = supply - hist[0][1]
+                if delta > budget and now - alerted_at > 3600:
+                    alerted_at = now
+                    import notify
+                    notify.send_alert("emission_tripwire",
+                        f"VSP net emission {delta/1e18:,.0f} in the last 24h exceeds budget {budget/1e18:,.0f} — "
+                        f"if unexpected, guardian: pause the StakeEngine (settlements are the only mint path).",
+                        supply=supply, delta_24h=delta)
+                    print(f"emission tripwire: ALERT delta24h={delta/1e18:,.0f} VSP", flush=True)
+            except Exception as _e:
+                print(f"emission tripwire error: {_e}", flush=True)
+            await asyncio.sleep(600)
+    asyncio.create_task(_emission_tripwire())
+    print("emission tripwire scheduled (10m cadence, 24h window)", flush=True)
+
     # patch_smax_keeper: S-03 layer (ii) operational half. Pokes core's
     # permissionless StakeEngine.refreshSMax when a transaction would actually
     # change state (I.4 deviation, or pending decay once per epoch); view calls
