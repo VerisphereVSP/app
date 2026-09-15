@@ -482,9 +482,13 @@ def _index_user_stake_canonical(db: Session, se, user_address: str, post_id: int
     for side in (0, 1):
         try:
             lot_info = se.functions.getUserLotInfo(addr, post_id, side).call()
+            # 2026-09-15: getUserLotInfo returns 4 fields since S-11 removed
+            # entryEpoch — (amount, weightedPosition, sideTotal, positionWeight).
+            # The old 5-field indexing raised IndexError on [4], swallowed at
+            # debug level, so NO user position has been indexed since S-11.
             amount = lot_info[0] / 1e18
             weighted_pos = lot_info[1] / 1e18
-            entry_epoch = lot_info[2]
+            entry_epoch = lot_info[2] if len(lot_info) >= 5 else 0
             # patch_bundle04_5_p6_apr_pos_weight_off_by_one: positionWeight is lot_info[4], not [3].
             # StakeEngine.getUserLotInfo returns 5 values:
             #   0=amount, 1=weightedPosition, 2=entryEpoch,
@@ -492,7 +496,7 @@ def _index_user_stake_canonical(db: Session, se, user_address: str, post_id: int
             # Reading [3] mis-populated chain_user_stake.position_weight
             # with sideTotal (post-side total stake), producing absurd
             # APRs downstream via daily-compounded inflation.
-            pos_weight = lot_info[4] / 1e18
+            pos_weight = (lot_info[4] if len(lot_info) >= 5 else lot_info[3]) / 1e18
 
             if amount > 0:
                 db.execute(sql_text("""
@@ -514,7 +518,7 @@ def _index_user_stake_canonical(db: Session, se, user_address: str, post_id: int
                 """), {"addr": user_address.lower(), "pid": post_id, "side": side})
 
         except Exception as e:
-            logger.debug("Failed to index user stake %s post %d side %d: %s",
+            logger.warning("Failed to index user stake %s post %d side %d: %s",
                          user_address[:10], post_id, side, e)
 
 
