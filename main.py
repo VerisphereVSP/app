@@ -619,8 +619,36 @@ def token_balance(address: str):
 @app.post("/api/reindex/{post_id}")
 def reindex_post(post_id: int, request: Request, user: str = None):
     """Trigger immediate reindex of a post, user stakes, and invalidate article cache.
-    security review 2026-09 (Low): admin-gated — this burns RPC on demand."""
-    require_admin(request, action="reindex", params={"post_id": post_id, "user": user})
+
+    2026-09-15 regression fix: the review-3 patch admin-gated this endpoint, but
+    the frontend calls it after every stake (?user=<addr>) — it is the ONLY
+    writer of chain_user_stake, so "Your stake" and post totals went stale
+    (403, silently). Per the reviewer's own guidance: keep the public form
+    narrow and heavily rate-limited; the heavy form stays admin-only.
+      public : ?user=<address> — one post, one user; 1 per 10s per (post,user),
+               30 per 5 min per IP; post_id must exist.
+      admin  : no user (full post reindex) — X-Admin-Key required.
+    """
+    if not user:
+        require_admin(request, action="reindex", params={"post_id": post_id, "user": user})
+    else:
+        from web3 import Web3 as _W3
+        if not _W3.is_address(user):
+            raise HTTPException(422, "user must be an address")
+        user = _W3.to_checksum_address(user)
+        ip = _rl_client_ip(request) if callable(_rl_client_ip) else (request.client.host if request.client else "unknown")
+        ok_ip, _ = _pub_rl._limiter.check(f"reindex-ip:{ip}", 30, 300)
+        ok_pu, _ = _pub_rl._limiter.check(f"reindex:{post_id}:{user.lower()}", 1, 10)
+        if not (ok_ip and ok_pu):
+            raise HTTPException(429, "reindex rate limit")
+        try:
+            from chain.registry_reader import get_claim_text
+            if post_id <= 0 or get_claim_text(post_id) is None:
+                raise HTTPException(404, "unknown post")
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # registry read unavailable: fall through, the indexer validates too
     # patch_session_leak_main_reindex: db.close() was after the work, so
     # any exception in index_post/execute/commit would skip the close
     # and leak the session until the postgres idle-tx timeout (5min)
