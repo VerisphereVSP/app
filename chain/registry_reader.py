@@ -21,9 +21,18 @@ def _get_registry():
 
 
 def get_claim_text(post_id: int) -> str | None:
-    """On-chain claim text for a post id, or None if unreadable/empty."""
+    """On-chain claim text for a POST id, or None if the post is not a claim
+    or unreadable. 2026-09-15 fix: getClaim() takes the claim's CONTENT index,
+    not the post id — resolve via getPost(post_id).contentId, as the indexer
+    does. (The previous version returned the wrong claim's text for post 1
+    and reverted for post 2.)"""
     try:
-        t = _get_registry().functions.getClaim(int(post_id)).call()
+        reg = _get_registry()
+        post = reg.functions.getPost(int(post_id)).call()
+        content_type, content_id = post[2], post[3]
+        if content_type != 0:
+            return None
+        t = reg.functions.getClaim(int(content_id)).call()
         return t if t else None
     except Exception:
         return None
