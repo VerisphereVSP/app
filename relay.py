@@ -70,7 +70,7 @@ def _detect_tx_type(calldata_hex, to_addr):
             # target is signed; absolute value for telemetry
             tx_value_vsp = abs(target) / 1e18
         except: pass
-    elif sel == "97be5523" or sel == "441a3e70":  # withdraw variants
+    elif sel in ("34a33867", "97be5523", "441a3e70"):  # withdraw(uint256,uint8,uint256,bool) + legacy variants
         tx_type = "unstake"
         try:
             from eth_abi import decode
@@ -236,6 +236,25 @@ class RelayRequest(BaseModel):
     fee_permit: PermitPayload | None = None  # Permit granting Forwarder VSP allowance for relay fee
 
 
+MAX_RELAY_GAS = 3_000_000  # review F #4: req.gas is signed by the user; bound what the relay will pay for
+
+
+def _constrain_permit(permit, from_addr: str) -> None:
+    """Review F #3: permits ride the relay only for the VSP token, only for the
+    protocol's spenders, only from the request signer."""
+    if permit is None:
+        return
+    from config import VSP_TOKEN_ADDRESS, POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, DEPLOYED
+    fwd_addr = (DEPLOYED.get("Forwarder") or os.getenv("FORWARDER_ADDRESS", "") or "").lower()
+    spenders = {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, fwd_addr) if a}
+    if (permit.token or "").lower() != (VSP_TOKEN_ADDRESS or "").lower():
+        raise HTTPException(400, "Permit token must be the VSP token")
+    if (permit.spender or "").lower() not in spenders:
+        raise HTTPException(400, "Permit spender must be a protocol contract")
+    if (permit.owner or "").lower() != (from_addr or "").lower():
+        raise HTTPException(400, "Permit owner must be the request signer")
+
+
 def _relay_targets() -> set[str]:
     """F-1: the only contracts the relay will forward to. Anything else — in
     particular an attacker's own contract that answers isTrustedForwarder —
@@ -246,6 +265,8 @@ def _relay_targets() -> set[str]:
 
 def _reject_value_and_unknown_target(body: "RelayRequest") -> None:
     req = body.request
+    if int(req.gas or 0) > MAX_RELAY_GAS:
+        raise HTTPException(400, f"Relay gas limit exceeds {MAX_RELAY_GAS}")
     if int(req.value or 0) != 0:
         raise HTTPException(400, "Relay requests must carry value 0: the protocol takes no native value")
     if (req.to or "").lower() not in _relay_targets():
@@ -596,6 +617,20 @@ def _relay_async_sync(body: RelayRequest, db: Session):
         except GuardError as ge:
             raise HTTPException(ge.code, ge.message)
 
+        # Review F (2026-09-18) #3: nothing the relay PAYS for happens before the
+        # user's forwarder signature is verified (a free eth_call), and permits
+        # are constrained to the protocol's own token and spenders — otherwise
+        # the relay EOA would submit permit() to any contract a caller named,
+        # burning gas and tripping the hourly spend breaker for everyone.
+        try:
+            is_valid = fwd.functions.verify(request_data).call()
+        except Exception as e:
+            raise HTTPException(400, f"Signature verification failed: {e}")
+        if not is_valid:
+            raise HTTPException(400, "Invalid signature")
+        _constrain_permit(body.permit, req.from_)
+        _constrain_permit(body.fee_permit, req.from_)
+
         # Permits (gasless pre-grant of allowances)
         if body.permit:
             _execute_permit(body.permit)
@@ -605,7 +640,7 @@ def _relay_async_sync(body: RelayRequest, db: Session):
                 _execute_permit(body.fee_permit)
                 logger.info("Fee permit executed for %s", req.from_[:10])
             except Exception as e:
-                logger.debug("Fee permit skip (non-fatal): %s", e)
+                logger.warning("Fee permit skipped (non-fatal): %s", e)
 
         # patch_postreview_memo_dark: memo dark-gate (see _gate_memo above)
         _gate_memo(calldata_hex)
@@ -622,12 +657,7 @@ def _relay_async_sync(body: RelayRequest, db: Session):
         # a doomed tx) and polluted tx logs with reverts the FE then has to
         # surface as user-visible failures. Failing closed at verify-time
         # rejects the user cleanly; the FE retries.
-        try:
-            is_valid = fwd.functions.verify(request_data).call()
-        except Exception as e:
-            raise HTTPException(400, f"Signature verification failed: {e}")
-        if not is_valid:
-            raise HTTPException(400, "Invalid signature")
+        # (signature verification moved BEFORE permits — review F #3, 2026-09-18)
 
         # createClaim detection — pre-flight duplicate check
         is_create = (
