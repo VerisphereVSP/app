@@ -143,13 +143,11 @@ if MM_ROUTES_ENABLED and CHAIN_ID == 43114 and not os.getenv("SERVICE_API_TOKEN"
     raise RuntimeError("MM_ROUTES_ENABLED on mainnet requires SERVICE_API_TOKEN (fail-closed)")
 VSP_ADDRESS = VSP_TOKEN_ADDRESS
 
-# Market maker wallet (reserves — backs outstanding VSP)
-_MM_ADDRESS_FUJI_FALLBACK = "0x744a16c4Fe6B618E29D5Cb05C5a9cBa72175e60a"
-MM_ADDRESS = _require_for_mainnet(
-    "MM_ADDRESS",
-    os.getenv("MM_ADDRESS", _MM_ADDRESS_FUJI_FALLBACK),
-    _MM_ADDRESS_FUJI_FALLBACK,
-)
+# Market maker wallet — RETIRED 2026-09-11 (Phase 5). The company market maker no
+# longer exists: routes are 410, the reconciler is disabled, the keys are destroyed.
+# MM_ADDRESS is optional everywhere and empty by default; nothing on the live path
+# reads it (balance_sampler reports it only if set; mm_routes are gated off).
+MM_ADDRESS = os.getenv("MM_ADDRESS", "").strip()
 
 # Treasury wallet (revenue — receives trade fees + relay fees)
 # patch_bundle10c_backend_hardening_config: explicit TREASURY_ADDRESS required on mainnet.
@@ -188,7 +186,7 @@ if COLD_RESERVE_ADDRESS:
     _crl = COLD_RESERVE_ADDRESS.lower()
     if not (COLD_RESERVE_ADDRESS.startswith("0x") and len(COLD_RESERVE_ADDRESS) == 42):
         raise RuntimeError(f"config.py: VSP_COLD_RESERVE_ADDRESS malformed: {COLD_RESERVE_ADDRESS!r}")
-    if _crl == MM_ADDRESS.lower():
+    if MM_ADDRESS and _crl == MM_ADDRESS.lower():
         raise RuntimeError("config.py: VSP_COLD_RESERVE_ADDRESS must differ from MM_ADDRESS (sweep would be a self-send).")
     if _crl == TREASURY_ADDRESS.lower():
         raise RuntimeError("config.py: VSP_COLD_RESERVE_ADDRESS must differ from TREASURY_ADDRESS (cold reserves must be segregated from the fee sink).")
