@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 _RAY = 10 ** 18
 
 def _ray_to_pct(ray_value: int) -> float:
-    """Convert effectiveVSRay (1e18) to percentage [-100, 100]."""
-    return round(ray_value / _RAY * 100, 2)
+    """Convert effectiveVSRay (1e18) to percentage [-100, 100].
+    patch_vs_single_source: delegates to chain.vs (single conversion)."""
+    from chain.vs import ray_to_pct
+    return round(ray_to_pct(ray_value), 2)
 
 def _registry():
     return w3.eth.contract(

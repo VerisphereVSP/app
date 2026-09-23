@@ -145,13 +145,11 @@ def _lane_and_visibility(members: List[Item], claim_anchored: bool):
 
     claims = [m for m in members if m.is_claim]
     agg_stake = sum(c.stake for c in claims)
-    if agg_stake > STAKE_EPS:
-        # stake-weighted mean VS
-        agg_vs = sum(c.vs * c.stake for c in claims) / agg_stake
-    else:
-        # unstaked: fall back to simple mean so a nonzero VS still lanes it
-        agg_vs = sum(c.vs for c in claims) / len(claims) if claims else 0.0
-    agg_vs = max(-100.0, min(100.0, agg_vs))
+    # patch_vs_single_source: one aggregator for every group of claims. Unstaked
+    # members carry zero weight, so an unstaked group reads 0 (no simple-mean
+    # fallback) and is hidden by the rule below.
+    from chain.vs import stake_weighted_vs
+    agg_vs = stake_weighted_vs((c.vs, c.stake) for c in claims)
 
     # whole group unstaked AND no VS signal -> hidden
     if agg_stake <= STAKE_EPS and abs(agg_vs) < 1e-9:

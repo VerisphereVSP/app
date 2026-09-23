@@ -106,14 +106,15 @@ def _audit_one_post(db: Session, post_id: int) -> int:
         chain_total = chain_support + chain_challenge
         chain_active = chain_total >= 1.0
 
+        # patch_vs_single_source: a failed read is not a chain value of 0.0 — it would
+        # log a phantom 'drift' on every post. Skip the post instead.
+        from chain.vs import read_effective_vs_pct, read_base_vs_pct
         try:
-            chain_effective_vs = (sc.functions.effectiveVSRay(post_id).call() / 1e18) * 100
-        except Exception:
-            chain_effective_vs = 0.0
-        try:
-            chain_base_vs = (sc.functions.baseVSRay(post_id).call() / 1e18) * 100
-        except Exception:
-            chain_base_vs = 0.0
+            chain_effective_vs = read_effective_vs_pct(sc, post_id)
+            chain_base_vs = read_base_vs_pct(sc, post_id)
+        except Exception as e:
+            logger.warning("audit: post %d VS read failed, skipping: %s", post_id, e)
+            return 0
     except Exception as e:
         # RPC failed — not drift; skip and try this post next cycle.
         logger.debug("audit: chain read failed for post %d: %s", post_id, e)

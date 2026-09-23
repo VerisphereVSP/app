@@ -586,16 +586,12 @@ def index_post_canonical(
     total = support + challenge
 
     # ── VS scores ─────
-    try:
-        vs_ray = sc.functions.effectiveVSRay(post_id).call()
-        effective_vs = (vs_ray / 1e18) * 100
-    except Exception:
-        effective_vs = 0.0
-    try:
-        base_ray = sc.functions.baseVSRay(post_id).call()
-        base_vs = (base_ray / 1e18) * 100
-    except Exception:
-        base_vs = 0.0
+    # patch_vs_single_source: the chain is the only source of a VS. A failed read
+    # raises (this function is documented to raise; the caller rolls back)
+    # instead of writing a fabricated 0.0 into chain_post.
+    from chain.vs import read_effective_vs_pct, read_base_vs_pct
+    effective_vs = read_effective_vs_pct(sc, post_id)
+    base_vs = read_base_vs_pct(sc, post_id)
 
     # ── Post metadata ─────
     try:
