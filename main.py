@@ -411,17 +411,15 @@ def debug_claim(post_id: int, request: Request):
         result["stake_support"] = support
         result["stake_challenge"] = challenge
         result["stake_total"] = support + challenge
-        if support + challenge > 0:
-            result["simple_vs"] = ((support - challenge) / (support + challenge)) * 100
-        else:
-            result["simple_vs"] = 0
+        # patch_vs_single_source: no off-chain VS formula, even in debug output
     except Exception as e:
         result["stake_error"] = str(e)
     try:
         se = _get_score_engine()
+        from chain.vs import ray_to_pct
         vs_ray = se.functions.effectiveVSRay(post_id).call()
         result["effectiveVSRay_raw"] = str(vs_ray)
-        result["effectiveVS_pct"] = (vs_ray / 1e18) * 100
+        result["effectiveVS_pct"] = ray_to_pct(vs_ray)
     except Exception as e:
         result["vs_ray_error"] = str(e)
     result["get_verity_score_result"] = get_verity_score(post_id)

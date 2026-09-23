@@ -258,7 +258,13 @@ def assign_to_group(db: Session, post_id: int) -> Optional[int]:
 
 
 def _refresh_group_stats(db: Session, group_id: int):
-    """Recompute canonical, aggregate VS (base + link effects)."""
+    """Recompute canonical and aggregate VS.
+
+    patch_vs_single_source: aggregate_vs is the stake-weighted mean of the members'
+    chain effective_vs (chain.vs.stake_weighted_vs). Links are not an input:
+    each member's effective_vs already contains its incoming evidence, and the
+    old formula added VSP-denominated link mass to a base percentage.
+    """
     members = db.execute(sql_text(
         "SELECT c.post_id, c.claim_text, "
         "       COALESCE(p.support_total, 0), COALESCE(p.challenge_total, 0), "
@@ -285,26 +291,8 @@ def _refresh_group_stats(db: Session, group_id: int):
                 best_pid, best_text = m[0], m[1]
                 best_effect = m[2] + m[3]
 
-    total_stake = total_sup + total_chal
-    base_vs = ((total_sup - total_chal) / total_stake * 100) if total_stake > 0 else 0.0
-
-    # Sum incoming link effects across all members
-    link_eff = 0.0
-    try:
-        from chain.chain_db import compute_edge_contribution
-        for m in members:
-            links = db.execute(sql_text(
-                "SELECT link_post_id FROM chain_link WHERE to_post_id = :pid"
-            ), {"pid": m[0]}).fetchall()
-            for (lpid,) in links:
-                try:
-                    link_eff += compute_edge_contribution(db, m[0], lpid)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    agg_vs = max(-100.0, min(100.0, base_vs + link_eff))
+    from chain.vs import stake_weighted_vs
+    agg_vs = stake_weighted_vs((vs, sup + chal) for _pid, _text, sup, chal, vs in members)
 
     db.execute(sql_text(
         "UPDATE claim_dupe_group SET "

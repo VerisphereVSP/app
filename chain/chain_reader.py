@@ -184,38 +184,17 @@ def get_user_stake(user_address, post_id, side):
 
 
 def get_verity_score(post_id):
-    """Returns verity score as a float in -100 to +100 range.
-    effectiveVSRay returns a Ray-scaled int256 where 1e18 = 1.0 (i.e. 100%).
-    Falls back to stake-share formula if on-chain score is 0 but stakes exist.
-    
-    Formula: if support > challenge → +(support/total)*100
-             if challenge > support → -(challenge/total)*100
-             if equal or zero → 0
+    """Effective VS from ScoreEngine.effectiveVSRay, as a float in [-100, 100].
+
+    patch_vs_single_source: there is NO fallback formula. The old stake-share
+    fallback silently dropped all link evidence whenever the RPC hiccupped.
+    A read failure raises; callers that can tolerate it catch it themselves.
     """
+    from chain.vs import read_effective_vs_pct
+
     def _read_vs():
-        se = _get_score_engine()
-        vs_ray = se.functions.effectiveVSRay(post_id).call()
-        return (vs_ray / 1e18) * 100
-    try:
-        return _cached(f"vs:{post_id}", _read_vs)
-    except Exception as e:
-        logger.warning("Failed to read verity score for post %d: %s", post_id, e)
-
-    # Fallback: compute using same formula as ScoreEngine.baseVSRay
-    try:
-        support, challenge = get_stake_totals(post_id)
-        total = support + challenge
-        if total > 0.001:
-            if support > challenge:
-                return (support / total) * 100
-            elif challenge > support:
-                return -(challenge / total) * 100
-            else:
-                return 0.0
-    except Exception:
-        pass
-
-    return 0.0
+        return read_effective_vs_pct(_get_score_engine(), post_id)
+    return _cached(f"vs:{post_id}", _read_vs)
 
 
 
