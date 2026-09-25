@@ -23,7 +23,7 @@ COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Explicit fallback installs
-RUN pip install --no-cache-dir sqlalchemy python-dotenv psycopg2-binary
+RUN pip install --no-cache-dir "sqlalchemy>=2.0.52,<2.1" python-dotenv psycopg2-binary  # hotfix_sqlalchemy21
 
 # Verify key packages are installed
 RUN pip list | grep -E "sqlalchemy|python-dotenv|psycopg2" || exit 1
