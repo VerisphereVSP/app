@@ -589,9 +589,9 @@ def index_post_canonical(
     # patch_vs_single_source: the chain is the only source of a VS. A failed read
     # raises (this function is documented to raise; the caller rolls back)
     # instead of writing a fabricated 0.0 into chain_post.
-    from chain.vs import read_effective_vs_pct, read_base_vs_pct
+    from chain.vs import read_effective_vs_pct
     effective_vs = read_effective_vs_pct(sc, post_id)
-    base_vs = read_base_vs_pct(sc, post_id)
+    base_vs = effective_vs  # patch_game_b: base VS is internal (v17 §4.1); a post has ONE score. Column kept for compatibility.
 
     # ── Post metadata ─────
     try:
@@ -785,10 +785,19 @@ def _list_connected_posts(db: Session, post_id: int) -> set:
     """Return post_ids one hop away from this post via chain_link.
     Used for VS recomputation: a new edge into post X means posts that
     link to X also have their VS affected."""
+    # patch_game_b: a change on a post affects every DESCENDANT's effective score (v17 §4.2),
+    # not just one hop. Walk to_post_id edges recursively (bounded depth 12), plus the direct
+    # parents and the incident link posts as before.
     rows = db.execute(sql_text(
-        "SELECT DISTINCT from_post_id AS pid FROM chain_link WHERE to_post_id = :pid "
+        "WITH RECURSIVE down(pid, depth) AS ("
+        "  SELECT to_post_id, 1 FROM chain_link WHERE from_post_id = :pid "
+        "  UNION "
+        "  SELECT l.to_post_id, d.depth + 1 FROM chain_link l JOIN down d ON l.from_post_id = d.pid "
+        "  WHERE d.depth < 12"
+        ") "
+        "SELECT pid FROM down "
         "UNION "
-        "SELECT DISTINCT to_post_id   AS pid FROM chain_link WHERE from_post_id = :pid "
+        "SELECT DISTINCT from_post_id AS pid FROM chain_link WHERE to_post_id = :pid "
         "UNION "
         "SELECT DISTINCT link_post_id AS pid FROM chain_link "
         "WHERE from_post_id = :pid OR to_post_id = :pid"

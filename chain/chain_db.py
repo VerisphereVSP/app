@@ -338,61 +338,15 @@ def get_edges(db: Session, post_id: int, direction: str) -> list[dict]:
         } for r in rows]
 
 def compute_edge_contribution(db: Session, target_post_id: int, link_post_id: int) -> float:
-    """Compute edge contribution from DB — replicates ScoreEngine formula.
+    """Per-link contribution ("Effect" column), in VSP.
 
-    contribution = parentVS_frac * parentTotal * (linkStake / sumOutgoing) * linkVS_frac
-    if isChallenge: contribution = -contribution
-
-    All values from indexed chain_post + chain_link tables.
-    parentVS uses effective_vs (already includes recursive link propagation).
+    patch_game_b: read from the chain (ScoreEngine.getEdgeContribution) instead of mirroring
+    the contract formula here — the mirror was the last off-chain copy of contract math and
+    drifted the moment the formula (time-weighting, base-VS scale) changed. The `db` argument
+    is kept for the call sites; it is unused. Raises on RPC failure (no fallback formula).
     """
-    link_row = db.execute(sql_text(
-        "SELECT from_post_id, to_post_id, is_challenge FROM chain_link WHERE link_post_id = :lid"
-    ), {"lid": link_post_id}).fetchone()
-    if not link_row:
-        return 0.0
-
-    from_pid, to_pid, is_challenge = link_row
-    if to_pid != target_post_id:
-        return 0.0
-
-    parent = db.execute(sql_text(
-        "SELECT support_total, challenge_total, effective_vs "
-        "FROM chain_post WHERE post_id = :pid"
-    ), {"pid": from_pid}).fetchone()
-    if not parent:
-        return 0.0
-
-    parent_total = parent[0] + parent[1]
-    parent_eff_vs = parent[2]
-
-    if parent_total < 1.0 or parent_eff_vs <= 0:
-        return 0.0
-
-    link = db.execute(sql_text(
-        "SELECT support_total, challenge_total, base_vs FROM chain_post WHERE post_id = :pid"
-    ), {"pid": link_post_id}).fetchone()
-    if not link:
-        return 0.0
-
-    link_total = link[0] + link[1]
-    link_base_vs = link[2]
-
-    if link_total < 1.0 or link_base_vs <= 0:
-        return 0.0
-
-    out_rows = db.execute(sql_text(
-        "SELECT p.support_total, p.challenge_total "
-        "FROM chain_link l "
-        "JOIN chain_post p ON l.link_post_id = p.post_id "
-        "WHERE l.from_post_id = :pid"
-    ), {"pid": from_pid}).fetchall()
-
-    sum_outgoing = sum((r[0] + r[1]) for r in out_rows if (r[0] + r[1]) >= 1.0)
-    if sum_outgoing == 0:
-        return 0.0
-
-    contrib = (parent_eff_vs / 100.0) * parent_total * (link_total / sum_outgoing) * (link_base_vs / 100.0)
-    if is_challenge:
-        contrib = -contrib
-    return round(contrib, 6)
+    from chain.chain_reader import _get_score_engine
+    from chain.vs import RAY
+    se = _get_score_engine()
+    contrib_wei = se.functions.getEdgeContribution(int(target_post_id), int(link_post_id)).call()
+    return int(contrib_wei) / RAY

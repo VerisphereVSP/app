@@ -108,10 +108,10 @@ def _audit_one_post(db: Session, post_id: int) -> int:
 
         # patch_vs_single_source: a failed read is not a chain value of 0.0 — it would
         # log a phantom 'drift' on every post. Skip the post instead.
-        from chain.vs import read_effective_vs_pct, read_base_vs_pct
+        from chain.vs import read_effective_vs_pct
         try:
             chain_effective_vs = read_effective_vs_pct(sc, post_id)
-            chain_base_vs = read_base_vs_pct(sc, post_id)
+            chain_base_vs = chain_effective_vs  # patch_game_b: base VS internal; one score per post
         except Exception as e:
             logger.warning("audit: post %d VS read failed, skipping: %s", post_id, e)
             return 0
@@ -126,8 +126,7 @@ def _audit_one_post(db: Session, post_id: int) -> int:
         findings.append(("support_total", str(db_row.support_total), str(chain_support)))
     if not _floats_match(db_row.challenge_total, chain_challenge):
         findings.append(("challenge_total", str(db_row.challenge_total), str(chain_challenge)))
-    if not _floats_match(db_row.base_vs, chain_base_vs):
-        findings.append(("base_vs", str(db_row.base_vs), str(chain_base_vs)))
+    # patch_game_b: base_vs not audited (internal; column mirrors effective_vs)
     if not _floats_match(db_row.effective_vs, chain_effective_vs):
         findings.append(("effective_vs", str(db_row.effective_vs), str(chain_effective_vs)))
     if not _bools_match(db_row.is_active, chain_active):
