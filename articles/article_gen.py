@@ -4,7 +4,6 @@ AI article generation: creates a Wikipedia-style article decomposed into
 sections of atomic sentences, each sentence a stakeable claim.
 """
 import json
-import requests
 from urllib.parse import urlparse
 import re
 import logging
@@ -84,11 +83,16 @@ Output: Earth orbits the Sun every 365.25 days."""
 
 
 def _fetch_url_text(url: str, max_chars: int = 12000) -> str:
-    """Fetch a URL and extract plain text content."""
+    """Fetch a URL and extract plain text content.
+
+    patch_app_hardening_ssrf: the fetch goes through safe_fetch (scheme/host/address
+    checks on the URL and on every redirect, 1 MB cap) so a topic that is a URL can
+    never make this server read loopback, private, link-local or metadata addresses.
+    """
     import re as _re
-    resp = requests.get(url, timeout=15, headers={"User-Agent": "Verisphere/1.0"})
-    resp.raise_for_status()
-    html = resp.text
+    from safe_fetch import fetch_text
+    _, body = fetch_text(url)
+    html = body.decode("utf-8", errors="replace")
     # Remove scripts, styles, comments
     html = _re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", "", html, flags=_re.DOTALL | _re.IGNORECASE)
     html = _re.sub(r"<!--.*?-->", "", html, flags=_re.DOTALL)

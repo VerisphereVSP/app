@@ -313,6 +313,38 @@ def _require_sentence_matches_chain(db: Session, sentence_id: int, post_id: int)
         raise HTTPException(422, "Sentence text does not match the on-chain claim text")
 
 
+def _chain_claim_text(db: Session, post_id: int):
+    """Indexed on-chain claim text for post_id, falling back to a live registry read
+    while the indexer catches up. None when neither source has it yet."""
+    chain_text = None
+    try:
+        r = db.execute(sql_text("SELECT claim_text FROM chain_claim_text WHERE post_id = :p"),
+                       {"p": post_id}).fetchone()
+        if r and r[0] is not None:
+            chain_text = r[0]
+    except Exception:
+        chain_text = None
+    if chain_text is None:
+        try:
+            from chain.registry_reader import get_claim_text
+            chain_text = get_claim_text(post_id)
+        except Exception:
+            chain_text = None
+    return chain_text
+
+
+def _require_text_matches_post(db: Session, text: str, post_id: int) -> str:
+    """patch_app_hardening_detect_topic: 409 if the claim is not readable yet, 422 if
+    the supplied text is not the on-chain claim for post_id. Returns the canonical
+    on-chain text so callers never store the caller's spelling."""
+    chain_text = _chain_claim_text(db, int(post_id))
+    if chain_text is None:
+        raise HTTPException(409, "Claim not yet indexed; retry shortly")
+    if _onchain_normalize(text or "") != _onchain_normalize(chain_text):
+        raise HTTPException(422, "claim_text does not match the on-chain claim for this post_id")
+    return chain_text
+
+
 def _increment_view_count(db: Session, article_id: int):
     """Increment the view counter for an article. Non-fatal."""
     try:
@@ -777,6 +809,13 @@ def detect_topic_endpoint(req: DetectTopicRequest, db: Session = Depends(get_db)
     and trigger background article generation if needed.
     Returns immediately with the detected topic."""
     from articles.topic_detect import detect_topic, ensure_article_for_claim, snap_topic
+
+    # patch_app_hardening_detect_topic (2026-10-01, external review): the caller used to
+    # choose both the text and the post_id, so any text could be placed in an article
+    # under another claim's id and score. Same invariant as link_post / claims/record:
+    # the text must equal the on-chain claim for post_id under the registry's own
+    # normalization, and from here on the canonical chain text is what we use.
+    req.claim_text = _require_text_matches_post(db, req.claim_text, req.post_id)
 
     # patch_detect_topic_fix: cluster-then-label here too — inherit a near-identical
     # existing claim's topic (>= snap threshold) so near-dup claims share article
