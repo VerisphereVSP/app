@@ -407,6 +407,8 @@ def _route_template(request: Request) -> Optional[str]:
     that instead. Available only AFTER call_next, hence metering is
     post-dispatch (the tripping request is counted, the next is blocked).
     None means genuinely unrouted (404) -- deliberately unmetered.
+    patch_app_hardening_endpoint_limit: now read from enforce_endpoint_limit (a
+    dependency, post-routing, pre-handler) instead of after call_next.
     """
     route = request.scope.get("route")
     return getattr(route, "path", None) if route is not None else None
@@ -435,27 +437,35 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
 
         response = await call_next(request)
-
-        # patch_endpoint_limiter_scope_route: scope["route"] is only populated
-        # once routing has happened, so the per-endpoint cap is metered here.
-        template = _route_template(request)
-        if template is not None:
-            limit = ENDPOINT_RATE_LIMITS.get(template, ENDPOINT_RATE_DEFAULT)
-            if limit > 0:
-                ok, _ = _limiter.check(f"ep:{template}:{ip}", limit, ENDPOINT_RATE_WINDOW)
-                if not ok:
-                    logger.warning(
-                        "Endpoint rate limit exceeded for IP %s on %s (%d/min)",
-                        ip, template, limit,
-                    )
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": f"Too many requests to this endpoint. Limit: {limit} per minute."},
-                        headers={"Retry-After": str(ENDPOINT_RATE_WINDOW)},
-                    )
-
+        # patch_app_hardening_endpoint_limit (2026-10-01, external review): the
+        # per-endpoint cap used to be metered HERE, after the handler had already
+        # done its work (the route template is only known post-routing in middleware).
+        # It is now enforced by enforce_endpoint_limit, an app-level dependency that
+        # runs after routing and BEFORE the handler. Nothing per-endpoint remains here.
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         return response
+
+
+async def enforce_endpoint_limit(request: Request) -> None:
+    """patch_app_hardening_endpoint_limit: per-endpoint cap, enforced before the
+    handler runs. Installed as a global dependency (FastAPI(dependencies=[...]) in
+    main.py), so it executes once routing has set scope["route"] and before any
+    path-operation code, body parsing included. Raises 429 with Retry-After."""
+    template = _route_template(request)
+    if template is None:
+        return
+    limit = ENDPOINT_RATE_LIMITS.get(template, ENDPOINT_RATE_DEFAULT)
+    if limit <= 0:
+        return
+    ip = _client_ip(request)
+    ok, _ = _limiter.check(f"ep:{template}:{ip}", limit, ENDPOINT_RATE_WINDOW)
+    if not ok:
+        logger.warning("Endpoint rate limit exceeded for IP %s on %s (%d/min)", ip, template, limit)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests to this endpoint. Limit: {limit} per minute.",
+            headers={"Retry-After": str(ENDPOINT_RATE_WINDOW)},
+        )
 
 
 # ── Decorators for specific endpoints ─────────────────────

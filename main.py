@@ -121,10 +121,16 @@ async def lifespan(app):
 from chain_indexer import start_indexer
 
 _expose_docs = os.getenv("EXPOSE_API_DOCS", "").strip().lower() in ("1", "true", "yes")  # patch_bundle12_docs_gate
+from fastapi import Depends as _Depends  # patch_app_hardening_endpoint_limit
+from rate_limit import enforce_endpoint_limit as _enforce_endpoint_limit
+
 app = FastAPI(  # patch_bundle12_docs_gate
     title="VeriSphere App API",
     version="0.1.0",
     lifespan=lifespan,
+    # patch_app_hardening_endpoint_limit: per-endpoint rate limit as a global
+    # dependency — runs after routing, before every handler (was post-handler).
+    dependencies=[_Depends(_enforce_endpoint_limit)],
     docs_url="/docs" if _expose_docs else None,
     redoc_url="/redoc" if _expose_docs else None,
     openapi_url="/openapi.json" if _expose_docs else None,
