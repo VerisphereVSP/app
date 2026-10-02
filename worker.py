@@ -323,8 +323,9 @@ async def main():
         asyncio.create_task(_keeper_loop())
         print(f"smax keeper scheduled (interval {_sk.KEEPER_INTERVAL_SEC}s, addr {_sk.keeper_address()})", flush=True)
 
-        # patch_game_b: epoch settlement pass (whitepaper v17 §3.2/§5.4) — settles every
-        # post once per epoch, parents before children, from the same keeper account.
+        # patch_game_b / patch_settlement_snapshots: epoch settlement pass (whitepaper v18
+        # §3.2/§4.2.6/§5.4) — settles every post once per epoch in keeper order (claims, links,
+        # children), from the same keeper account.
         import settle_keeper as _stk
         async def _settle_loop():
             await asyncio.sleep(120)
@@ -336,7 +337,7 @@ async def main():
                     print(f"settle-keeper error: {_e}", flush=True)
                 await asyncio.sleep(300)
         asyncio.create_task(_settle_loop())
-        print("settle keeper scheduled (epoch pass, topological order, every 300s check)", flush=True)
+        print("settle keeper scheduled (epoch pass, keeper order claims/links/children, every 300s check)", flush=True)
     else:
         print("smax keeper: unconfigured (KEEPER_KMS_KEY/KEEPER_ADDRESS unset) — idle", flush=True)
 

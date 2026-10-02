@@ -89,7 +89,7 @@ def _detect_tx_type(calldata_hex, to_addr):
     return tx_type, tx_value_vsp
 
 # Known custom errors — selector → human message
-from relay_errors import _KNOWN_ERRORS, _decode_revert_reason  # patch_game_b: testable without RPC
+from relay_errors import _KNOWN_ERRORS, _decode_revert_reason, _revert_selector_and_arg, SETTLE_FIRST_SELECTOR  # patch_game_b: testable without RPC
 
 router = APIRouter()
 
@@ -648,6 +648,17 @@ def _relay_async_sync(body: RelayRequest, db: Session):
             except Exception as sim_err:
                 reason = _decode_revert_reason(sim_err)
                 logger.info("Pre-flight simulation reverted: %s", reason)
+                # patch_settlement_snapshots: SettleFirst(postId) means a counted snapshot is stale or
+                # the post is unseeded — settle its one hop from the keeper now so the retry succeeds
+                sel, pid = _revert_selector_and_arg(sim_err)
+                if sel == SETTLE_FIRST_SELECTOR and pid is not None:
+                    try:
+                        import settle_keeper
+                        from db import get_session_factory
+                        if settle_keeper.repair_async(get_session_factory(), pid):
+                            logger.info("Pre-flight: SettleFirst(%d) — keeper one-hop repair started", pid)
+                    except Exception as rep_err:
+                        logger.warning("Pre-flight: SettleFirst repair not started: %s", rep_err)
                 raise HTTPException(400, reason)
 
         # On-chain fee verification (read what forwarder will charge)

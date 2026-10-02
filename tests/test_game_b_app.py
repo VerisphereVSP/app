@@ -1,6 +1,7 @@
 """patch_game_b — app side of evidence-economic settlement.
 
-  * settle_keeper.topo_order settles parents before children (Kahn), links after their parent,
+  * settle_keeper.topo_order settles parents before children (Kahn), links after their parent
+    (and, since patch_settlement_snapshots, before their child — see test_settlement_snapshots_app),
     and terminates on cycles.
   * relay maps SettleFirst / InexactScore / WhenPaused to honest messages (kill-switch drill
     2026-09-24 showed a pause read as a gas error).

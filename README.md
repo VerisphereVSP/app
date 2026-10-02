@@ -89,3 +89,31 @@ Two indexers run at startup:
 
 Both are necessary: the first feeds the semantic/dedup system, the second
 feeds the indexed read model.
+
+### Settlement keeper (whitepaper v18 — settlement on stored snapshots)
+
+`settle_keeper.py` runs from the worker once per epoch (default 86400 s, 600 s after the
+boundary) and calls `StakeEngine.updatePost` on every post that has not settled this epoch,
+in **keeper order**: claims, then the links that hang off them, then the claims those links
+point to (`topo_order` over parent → link → child; cycles fall back to id order, which the
+contract tolerates with one epoch of lag). A child's settlement reads the snapshots its
+parents and links wrote moments earlier in the same pass, so evidence counts the epoch after
+it is placed. Idempotent: posts already at the current epoch are skipped.
+
+When a user transaction hits `SettleFirst(postId)` (a counted snapshot older than the
+previous epoch, or an unseeded claim right after the upgrade), the relay starts a one-hop
+repair from the keeper account — that post's parents, links, then the post — so the user's
+retry settles inline. At most once per post per `SETTLE_REPAIR_COOLDOWN_SEC` (60).
+
+Upgrade runbook (core `script/UpgradeSnapshots.s.sol`): the script seeds every existing
+post's first snapshot — links first, then claims in `SEED_ORDER`, then any remaining claim
+by id. Produce `SEED_ORDER` from the indexed graph so children are seeded after their
+parents:
+
+```bash
+docker compose --env-file /dev/shm/vsp-resolved.env exec -T app python settle_keeper.py seed-order
+```
+
+and pass the printed list as `SEED_ORDER=…` to the upgrade script. Seeding is per-post
+idempotent; an unset `SEED_ORDER` is safe (unseeded parents simply count from their next
+settlement).
