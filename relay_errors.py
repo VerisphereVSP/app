@@ -28,7 +28,23 @@ _KNOWN_ERRORS = {
     "609b0047": "This post's evidence graph could not be scored exactly — please retry in a moment",
     # kill-switch drill 2026-09-24: a pause must read as a pause, not as a gas error
     "fb8e4881": "The protocol is paused by the guardian — staking and posting are temporarily disabled",
+    # patch_settlement_snapshots (whitepaper v18 §4.2.6): the user path reaches these only through
+    # settleSelf, which the StakeEngine folds into SettleFirst; direct callers see them as-is
+    "bf474a94": "This post's evidence is waiting for the network's settlement pass — please retry in a moment",
+    "b9c03aea": "This post has not been seeded since the upgrade — please retry in a moment",
 }
+
+SETTLE_FIRST_SELECTOR = "1e6049a5"  # SettleFirst(uint256 postId)
+
+
+def _revert_selector_and_arg(err) -> tuple[str | None, int | None]:
+    """(selector, first uint256 argument) from a web3 revert, or (None, None). Lets the relay act
+    on SettleFirst(postId) — kick the keeper's one-hop repair for that post — not just word it."""
+    m = re.search(r"0x([0-9a-fA-F]{8})([0-9a-fA-F]{64})?", str(err))
+    if not m:
+        return None, None
+    arg = int(m.group(2), 16) if m.group(2) else None
+    return m.group(1).lower(), arg
 
 
 def _decode_revert_reason(err) -> str:
