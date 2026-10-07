@@ -11,7 +11,8 @@ from web3 import Web3
 
 from mm_wallet import w3
 from config import POST_REGISTRY_ADDRESS, PROTOCOL_VIEWS_ADDRESS
-from .abi import POST_REGISTRY_ABI, PROTOCOL_VIEWS_ABI
+from .abi import POST_REGISTRY_ABI
+from .claim_summary import read_claim_summary
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,6 @@ def _registry():
     return w3.eth.contract(
         address=Web3.to_checksum_address(POST_REGISTRY_ADDRESS),
         abi=POST_REGISTRY_ABI,
-    )
-
-def _views():
-    if not PROTOCOL_VIEWS_ADDRESS:
-        raise ValueError("PROTOCOL_VIEWS_ADDRESS not set")
-    return w3.eth.contract(
-        address=Web3.to_checksum_address(PROTOCOL_VIEWS_ADDRESS),
-        abi=PROTOCOL_VIEWS_ABI,
     )
 
 def find_claim_by_text(text: str) -> Optional[int]:
@@ -62,22 +55,21 @@ def find_claim_by_text(text: str) -> Optional[int]:
 def fetch_claim_state(post_id: int) -> Dict[str, Any]:
     """Fetch full claim state from ProtocolViews. Never raises."""
     try:
-        views = _views()
-        summary = views.functions.getClaimSummary(post_id).call()
-        # ProtocolViews.ClaimSummary field order (core/src/ProtocolViews.sol):
-        # 0 text, 1 supportStake, 2 challengeStake, 3 totalStake, 4 postingFee,
-        # 5 isActive, 6 baseVSRay, 7 effectiveVSRay, 8 incomingCount,
-        # 9 outgoingCount. The struct carries no claim id — it is the argument.
-        support = int(summary[1])
-        challenge = int(summary[2])
+        if not PROTOCOL_VIEWS_ADDRESS:
+            raise ValueError("PROTOCOL_VIEWS_ADDRESS not set")
+        # Decoded by the field count the chain reports (9 since core v17, 10
+        # before), so a stale ABI artifact can't shift the score into the wrong
+        # field — see chain/claim_summary.py. The struct carries no claim id —
+        # it is the argument.
+        s = read_claim_summary(w3, PROTOCOL_VIEWS_ADDRESS, post_id)
         return {
             "claim_id": post_id,
-            "text": str(summary[0]),
-            "eVS": _ray_to_pct(int(summary[7])),
-            "stake": {"support": support, "challenge": challenge, "total": int(summary[3])},
-            "links": {"incoming": int(summary[8]), "outgoing": int(summary[9])},
-            "is_active": bool(summary[5]),
-            "posting_fee": int(summary[4]),
+            "text": s["text"],
+            "eVS": _ray_to_pct(s["effectiveVSRay"]),
+            "stake": {"support": s["supportStake"], "challenge": s["challengeStake"], "total": s["totalStake"]},
+            "links": {"incoming": s["incomingCount"], "outgoing": s["outgoingCount"]},
+            "is_active": s["isActive"],
+            "posting_fee": s["postingFee"],
         }
     except Exception as e:
         logger.error(f"fetch_claim_state({post_id}) failed: {e}")

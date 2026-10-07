@@ -15,7 +15,8 @@ from web3 import Web3
 
 from mm_wallet import w3
 from config import PROTOCOL_VIEWS_ADDRESS, STAKE_ENGINE_ADDRESS
-from chain.abi import PROTOCOL_VIEWS_ABI, STAKE_ENGINE_ABI
+from chain.abi import STAKE_ENGINE_ABI
+from chain.claim_summary import read_claim_summary
 from db import get_db
 from moderation import check_content_fast
 
@@ -24,15 +25,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/claims", tags=["claims"])
 
 _RAY = 10**18
-
-
-def _views():
-    if not PROTOCOL_VIEWS_ADDRESS:
-        raise HTTPException(503, "ProtocolViews not configured")
-    return w3.eth.contract(
-        address=Web3.to_checksum_address(PROTOCOL_VIEWS_ADDRESS),
-        abi=PROTOCOL_VIEWS_ABI,
-    )
 
 
 def _stake():
@@ -123,26 +115,29 @@ def claim_live(post_id: int):
     One ProtocolViews call, so every field is from the same block — no chance of
     stakes and score disagreeing. is_active comes from the contract's own
     totalStake >= postingFee test rather than being recomputed here.
+
+    The struct is decoded from the raw return data by the field count the chain
+    reports (9 since core v17, 10 before), not by the ABI artifact — a stale
+    artifact used to shift the words by one and report incomingCount as
+    effective_vs. See chain/claim_summary.py. A post has ONE score since core
+    v17, so there is no base_vs here (the old response carried one).
     """
+    if not PROTOCOL_VIEWS_ADDRESS:
+        raise HTTPException(503, "ProtocolViews not configured")
     try:
-        s = _views().functions.getClaimSummary(post_id).call()
+        s = read_claim_summary(w3, PROTOCOL_VIEWS_ADDRESS, post_id)
     except Exception as e:
         logger.warning("claim_live(%d) failed: %s", post_id, e)
         raise HTTPException(502, "Chain read failed")
 
-    # ProtocolViews.ClaimSummary field order (core/src/ProtocolViews.sol):
-    # text, supportStake, challengeStake, totalStake, postingFee, isActive,
-    # baseVSRay, effectiveVSRay, incomingCount, outgoingCount.
-    support, challenge, total = int(s[1]), int(s[2]), int(s[3])
     return {
         "post_id": post_id,
-        "support_vsp": round(_wei_to_vsp(support), 6),
-        "challenge_vsp": round(_wei_to_vsp(challenge), 6),
-        "total_vsp": round(_wei_to_vsp(total), 6),
-        "posting_fee_vsp": round(_wei_to_vsp(int(s[4])), 6),
-        "active": bool(s[5]),
-        "base_vs": _ray_to_pct(int(s[6])),
-        "effective_vs": _ray_to_pct(int(s[7])),
+        "support_vsp": round(_wei_to_vsp(s["supportStake"]), 6),
+        "challenge_vsp": round(_wei_to_vsp(s["challengeStake"]), 6),
+        "total_vsp": round(_wei_to_vsp(s["totalStake"]), 6),
+        "posting_fee_vsp": round(_wei_to_vsp(s["postingFee"]), 6),
+        "active": s["isActive"],
+        "effective_vs": _ray_to_pct(s["effectiveVSRay"]),
     }
 
 
