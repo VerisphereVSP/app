@@ -43,6 +43,25 @@ def stats() -> dict:
     return dict(_stats)
 
 
+def _record_pass(db_session_factory, epoch: int, settled: int, failed: int, pending: int) -> None:
+    """patch_ops_watch_wallets: persist the pass outcome as ops_metrics rows so the
+    dashboard can show the last settlement pass (when, which epoch, settled/failed)
+    instead of only the container log. Never raises."""
+    try:
+        from balance_sampler import record_metric
+        db = db_session_factory()
+        try:
+            labels = {"epoch": int(epoch)}
+            record_metric(db, "settle_pass_settled", settled, labels)
+            record_metric(db, "settle_pass_failed", failed, labels)
+            record_metric(db, "settle_pass_pending", pending, labels)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:  # instrumentation must never break settlement
+        logger.warning("settle_keeper: pass metrics not recorded: %s", e)
+
+
 def topo_order(post_ids: list[int], edges: list[tuple[int, int]]) -> list[int]:
     """Kahn's algorithm over the dependency edges (parent -> link, link -> child). Cycles:
     remaining nodes appended in id order (v18: a hop settled out of order reads last epoch's
@@ -130,6 +149,7 @@ def poll_once(db_session_factory) -> None:
     _stats["last_lag_posts"] = len(pending)
     if not pending:
         _last_pass_epoch = current_epoch
+        _record_pass(db_session_factory, current_epoch, 0, 0, 0)  # a pass with nothing to do is still a pass
         return
     logger.info("settle_keeper: epoch %d pass — %d/%d posts to settle (keeper order: claims, links, children)",
                 current_epoch, len(pending), len(order))
@@ -150,6 +170,7 @@ def poll_once(db_session_factory) -> None:
     if failed == 0 and len(pending) <= MAX_PER_CYCLE:
         _last_pass_epoch = current_epoch
     logger.info("settle_keeper: epoch %d pass done — settled=%d failed=%d", current_epoch, settled, failed)
+    _record_pass(db_session_factory, current_epoch, settled, failed, max(0, len(pending) - MAX_PER_CYCLE))
 
 
 # ── on-demand repair (user path hit SettleFirst) ────────────────────────────────────────────

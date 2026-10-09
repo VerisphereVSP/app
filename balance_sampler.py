@@ -49,6 +49,60 @@ except Exception:
 RELAY_ADDRESS = os.getenv("RELAY_ADDRESS", "")
 WORKER_ADDRESS = os.getenv("MM_TREASURY_WORKER_ADDRESS", "")
 
+# patch_ops_watch_wallets: every system wallet, not just the gas payers. Fixed roles come
+# from the env the worker already has; anything else (deployer, the three Safe signers)
+# is listed in VSP_WATCH_WALLETS="label:0xaddr,label:0xaddr". Safes also get their USDC
+# and VSP balances (token_balance{component,token}). Labels are what the dashboard shows.
+_FIXED_WALLET_ENVS = (
+    ("relay", "RELAY_ADDRESS"),
+    ("keeper", "KEEPER_ADDRESS"),
+    ("cold_safe", "TREASURY_ADDRESS"),
+    ("hot_safe", "HOT_SAFE_ADDRESS"),
+    ("guardian_safe", "GUARDIAN_SAFE_ADDRESS"),
+    ("cold_reserve", "VSP_COLD_RESERVE_ADDRESS"),
+)
+_ADDR_RE = __import__("re").compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _parse_watch_wallets(raw: str) -> dict:
+    """'label:0xaddr,label2:0xaddr2' -> {label: addr}. Bad entries are logged and skipped,
+    never fatal (instrumentation must not break the worker). Labels: [a-z0-9_]."""
+    out = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            logger.warning("balance_sampler: VSP_WATCH_WALLETS entry without ':' skipped: %r", item)
+            continue
+        label, addr = (x.strip() for x in item.split(":", 1))
+        if not __import__("re").fullmatch(r"[a-z0-9_]{1,32}", label) or not _ADDR_RE.match(addr):
+            logger.warning("balance_sampler: VSP_WATCH_WALLETS entry malformed, skipped: %r", item)
+            continue
+        out[label] = addr
+    return out
+
+
+def _token_components() -> set:
+    """Components whose USDC + VSP balances are sampled too (default: the three Safes)."""
+    raw = os.getenv("VSP_WATCH_TOKEN_COMPONENTS", "cold_safe,hot_safe,guardian_safe")
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _http_probes() -> list:
+    """(service, url) pairs for svc_up. Default = what runs behind the prod edge; override
+    with SVC_HTTP_PROBES="name=url,name=url" (dev's edge is nginx, so caddy reads down there)."""
+    raw = os.getenv("SVC_HTTP_PROBES",
+                    "app=http://app:8070/healthz,caddy=http://caddy/healthz,grafana=http://grafana:3000/api/health")
+    out = []
+    for item in raw.split(","):
+        item = item.strip()
+        if "=" in item:
+            name, url = item.split("=", 1)
+            if name.strip() and url.strip():
+                out.append((name.strip(), url.strip()))
+    return out
+
 try:
     from config import RPC_READ_URLS
 except Exception:
@@ -57,14 +111,19 @@ except Exception:
 
 
 def _components():
-    """The set of gas-paying EOAs to sample. Label -> address. Skips unset ones."""
+    """Every system wallet to sample. Label -> address. Unset roles are skipped; the
+    MM-era labels stay only while their env is still set. patch_ops_watch_wallets."""
     out = {}
-    if RELAY_ADDRESS:
-        out["relay"] = RELAY_ADDRESS
+    for label, env in _FIXED_WALLET_ENVS:
+        addr = os.getenv(env, "").strip()
+        if addr and _ADDR_RE.match(addr):
+            out[label] = addr
     if MM_ADDRESS:
         out["mm"] = MM_ADDRESS
     if WORKER_ADDRESS:
         out["worker"] = WORKER_ADDRESS
+    for label, addr in _parse_watch_wallets(os.getenv("VSP_WATCH_WALLETS", "")).items():
+        out.setdefault(label, addr)
     return out
 
 
@@ -156,6 +215,32 @@ def sample_balances_once():
                 sampled += 1
             except Exception as e:
                 logger.warning("balance_sampler: %s (%s) read failed: %s", label, addr, e)
+        # --- token balances of the Safes (USDC, VSP) --- patch_ops_watch_wallets
+        try:
+            _erc20 = [{"constant": True, "inputs": [{"name": "a", "type": "address"}], "name": "balanceOf",
+                       "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"}]
+            _tokens = []
+            _usdc = os.getenv("USDC_ADDRESS", "").strip()
+            if _usdc and _ADDR_RE.match(_usdc):
+                _tokens.append(("USDC", _usdc, 1e6))
+            try:
+                from config import VSP_TOKEN_ADDRESS as _vspt
+            except Exception:
+                _vspt = os.getenv("VSP_TOKEN_ADDRESS", "")
+            if _vspt and _ADDR_RE.match(_vspt):
+                _tokens.append(("VSP", _vspt, 1e18))
+            for label in sorted(_token_components() & set(comps)):
+                for tok, taddr, scale in _tokens:
+                    try:
+                        c = w3.eth.contract(address=w3.to_checksum_address(taddr), abi=_erc20)
+                        bal = c.functions.balanceOf(w3.to_checksum_address(comps[label])).call() / scale
+                        record_metric(db, "token_balance", bal,
+                                      {"component": label, "token": tok, "address": comps[label]})
+                        sampled += 1
+                    except Exception as e:
+                        logger.warning("balance_sampler: %s %s read failed: %s", label, tok, e)
+        except Exception as e:
+            logger.warning("balance_sampler: token balances failed: %s", e)
         # --- pool-era economic reads (Track B) --- patch_trackb_pool_reader
         # When the public pool is configured, its price IS the market price and
         # vsp_circulating_v2 (totalSupply - company-controlled balances) is the
@@ -254,6 +339,25 @@ def sample_balances_once():
                     record_metric(db, "indexer_lag_blocks", int(head) - int(last))
             except Exception as e:
                 logger.warning("balance_sampler: indexer lag read failed: %s", e)
+            # patch_ops_watch_wallets: drift RIGHT NOW (findings in the last audit window),
+            # not a 24 h count — the boundary lag at the epoch turn clears within minutes.
+            try:
+                drift_now = db.execute(sql_text(
+                    "SELECT COUNT(*) FROM indexer_audit_log WHERE audited_at > now() - interval '6 minutes'"
+                )).scalar()
+                record_metric(db, "indexer_audit_drift_now", int(drift_now or 0))
+            except Exception as e:
+                logger.warning("balance_sampler: audit drift read failed: %s", e)
+            # timelock watcher: how far its cursor trails the indexer's head block.
+            try:
+                row2 = db.execute(sql_text(
+                    "SELECT (SELECT value FROM chain_indexer_state WHERE key='last_block_global')::bigint - "
+                    "       (SELECT value FROM chain_indexer_state WHERE key='timelock_watch_last_block')::bigint"
+                )).scalar()
+                if row2 is not None:
+                    record_metric(db, "timelock_watch_lag_blocks", int(row2))
+            except Exception as e:
+                logger.warning("balance_sampler: timelock watcher lag read failed: %s", e)
             # resource levels if psutil present (reads /proc, not the Docker socket).
             try:
                 import psutil
@@ -280,22 +384,16 @@ def sample_balances_once():
                     return 1  # server answered with an HTTP status -> it's up
                 except Exception:
                     return 0  # connection refused / timeout / DNS -> down
-            # app + frontend: real HTTP health endpoints, reachable by compose DNS name.
-            record_metric(db, "svc_up", _http_up("http://app:8070/healthz"), {"service": "app"})
-            record_metric(db, "svc_up", _http_up("http://frontend:5173/"), {"service": "frontend"})
+            # patch_ops_watch_wallets: the services that actually run behind the prod edge.
+            # HTTP probes by compose DNS name (app, caddy, grafana; overridable via
+            # SVC_HTTP_PROBES); postgres and this worker are implicit. The MM-era "frontend"
+            # (dev's Vite server) and "treasury_worker" probes are gone with the MM.
+            for _name, _url in _http_probes():
+                record_metric(db, "svc_up", _http_up(_url), {"service": _name})
             # postgres: implicit — if we got here, our DB session works, so it's up.
             record_metric(db, "svc_up", 1, {"service": "postgres"})
             # main worker: the sampler runs inside it, so reaching this code = up.
             record_metric(db, "svc_up", 1, {"service": "worker"})
-            # treasury-worker: writes /heartbeats/treasury_worker.heartbeat each loop
-            # (shared volume). up = file mtime within 2x its interval (default 600s -> 1200s).
-            # File-based (not DB) so the funds-touching worker needs NO new DB code.
-            try:
-                _hb = "/heartbeats/treasury_worker.heartbeat"
-                age = time.time() - os.path.getmtime(_hb)
-                record_metric(db, "svc_up", 1 if age < 1200 else 0, {"service": "treasury_worker"})
-            except Exception:
-                record_metric(db, "svc_up", 0, {"service": "treasury_worker"})
             sampled += 1
         except Exception as e:
             logger.warning("balance_sampler: service probes failed: %s", e)
