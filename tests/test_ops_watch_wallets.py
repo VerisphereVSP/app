@@ -89,3 +89,27 @@ def test_record_pass_never_raises():
     def boom():
         raise RuntimeError("db down")
     sk._record_pass(boom, 1, 0, 0, 0)  # must swallow
+
+
+# ── patch_svc_probe_noredirect: a redirect counts as up; a closed port as down ──────────────
+import http.server
+import threading
+
+
+def test_http_up_treats_redirect_as_up_and_closed_port_as_down():
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(308)
+            self.send_header("Location", "https://nowhere.invalid/")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        assert bs._http_up(f"http://127.0.0.1:{port}/healthz", timeout=3) == 1
+    finally:
+        srv.shutdown(); srv.server_close()
+    assert bs._http_up(f"http://127.0.0.1:{port}/healthz", timeout=2) == 0  # port now closed
