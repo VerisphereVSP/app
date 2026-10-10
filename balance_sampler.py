@@ -89,6 +89,29 @@ def _token_components() -> set:
     return {x.strip() for x in raw.split(",") if x.strip()}
 
 
+# patch_svc_probe_noredirect: a redirect IS an answer. Caddy's :80 answers every request
+# with a redirect to https://<host>/…; following it to a hostname Caddy holds no certificate
+# for ("caddy") fails the TLS handshake, which read as Down. Module-level so it is testable.
+class _NoRedirect(__import__("urllib.request").request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # urllib then raises HTTPError(3xx) instead of following
+
+
+def _http_up(url, timeout=4):
+    """1 if the server answered with ANY HTTP status (2xx, 3xx, 403, 404 …) — it is listening;
+    0 only on connection error / timeout / DNS failure."""
+    import urllib.error
+    import urllib.request
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(url, timeout=timeout):
+            return 1
+    except urllib.error.HTTPError:
+        return 1
+    except Exception:
+        return 0
+
+
 def _http_probes() -> list:
     """(service, url) pairs for svc_up. Default = what runs behind the prod edge; override
     with SVC_HTTP_PROBES="name=url,name=url" (dev's edge is nginx, so caddy reads down there)."""
@@ -372,18 +395,6 @@ def sample_balances_once():
         # --- per-service health probes (Option A: HTTP probes + implicit/DB signals;
         # no Docker socket). Records svc_up{service=...} = 1/0 per service. ---
         try:
-            import urllib.request, urllib.error
-            def _http_up(url, timeout=4):
-                # ANY HTTP response (even 403/404) proves the server is listening = up.
-                # Vite's dev server 403s a bare GET (host-header allowlist), but it's up.
-                # Only a connection error / timeout / DNS failure means actually down.
-                try:
-                    with urllib.request.urlopen(url, timeout=timeout):
-                        return 1
-                except urllib.error.HTTPError:
-                    return 1  # server answered with an HTTP status -> it's up
-                except Exception:
-                    return 0  # connection refused / timeout / DNS -> down
             # patch_ops_watch_wallets: the services that actually run behind the prod edge.
             # HTTP probes by compose DNS name (app, caddy, grafana; overridable via
             # SVC_HTTP_PROBES); postgres and this worker are implicit. The MM-era "frontend"
