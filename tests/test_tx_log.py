@@ -42,9 +42,16 @@ CREATE TABLE tx_log (
   post_id         INTEGER,
   error_message   TEXT,
   submitted_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  resolved_at     TEXT
+  resolved_at     TEXT,
+  fee_quote_vsp   REAL,
+  fee_charge_vsp  REAL,
+  fee_status      TEXT NOT NULL DEFAULT 'none',
+  fee_tx_hash     TEXT,
+  fee_attempts    INTEGER NOT NULL DEFAULT 0,
+  fee_error       TEXT
 );
 """
+# patch_relay_gas_fee: the six fee columns (migration 320) ride tx_log
 
 
 @pytest.fixture

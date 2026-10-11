@@ -9,7 +9,7 @@ import logging
 import os  # patch_postreview_memo_dark
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from web3 import Web3
@@ -18,7 +18,7 @@ from web3.logs import DISCARD
 from config import FORWARDER_ADDRESS, POST_REGISTRY_ADDRESS
 from db import get_db
 from relay_wallet import w3, account as _relay_account, sign_and_send, TxRevertedError  # patch_bundle10_relay_key_separation
-from fee_calculator import compute_relay_fee, is_fee_exempt
+from fee_calculator import is_fee_exempt, quote_relay_fee, FeeOracleUnavailable  # patch_relay_gas_fee
 from config import VSP_ADDRESS  # patch_bundle10_relay_key_separation: dropped unused MM fee-wallet alias
 from moderation import check_content
 from rate_limit import relay_rate_limit
@@ -197,7 +197,8 @@ class RelayRequest(BaseModel):
     request: ForwardRequestPayload
     signature: str
     permit: PermitPayload | None = None
-    fee_permit: PermitPayload | None = None  # Permit granting Forwarder VSP allowance for relay fee
+    fee_permit: PermitPayload | None = None  # patch_relay_gas_fee: standing allowance to the COLLECTOR (relay wallet)
+    fee_quote_vsp: float | None = None       # patch_relay_gas_fee: the total the client displayed before signing
 
 
 MAX_RELAY_GAS = 3_000_000  # review F #4: req.gas is signed by the user; bound what the relay will pay for
@@ -210,7 +211,9 @@ def _constrain_permit(permit, from_addr: str) -> None:
         return
     from config import VSP_TOKEN_ADDRESS, POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, DEPLOYED
     fwd_addr = (DEPLOYED.get("Forwarder") or os.getenv("FORWARDER_ADDRESS", "") or "").lower()
-    spenders = {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, fwd_addr) if a}
+    # patch_relay_gas_fee: the relay wallet is the fee collector; its allowance is the standing fee permit
+    collector = (_relay_account.address or "").lower()
+    spenders = {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, fwd_addr, collector) if a}
     if (permit.token or "").lower() != (VSP_TOKEN_ADDRESS or "").lower():
         raise HTTPException(400, "Permit token must be the VSP token")
     if (permit.spender or "").lower() not in spenders:
@@ -468,30 +471,88 @@ async def get_nonce(address: str):
 
 
 
-@router.get("/api/relay/estimate-fee")
-async def estimate_fee(to: str, calldata: str, db: Session = Depends(get_db)):
-    """Estimate the relay fee for a given transaction.
-    Used by the frontend to show users the fee before signing."""
+# ── patch_relay_gas_fee: the relay quotes its own gas-indexed fee ───────────
+# Default gas per action when the inner call cannot be estimated before the
+# user has signed (typically: allowance not yet granted). Generous, so a
+# pre-signature quote errs high and the submission charge (min(displayed,
+# recomputed)) comes down to the real figure.
+_DEFAULT_INNER_GAS = {"claim": 450_000, "link": 350_000, "stake": 300_000, "withdraw": 250_000}
+
+
+def _collector_address() -> str:
+    return _relay_account.address
+
+
+def _onchain_fee_vsp(calldata_bytes: bytes) -> float:
+    """What the Forwarder still charges by itself. 0 once governance has run
+    setFeeConfig(0, 0, false); subtracted from the quote during the transition
+    so the user pays exactly the displayed total either way."""
     try:
-        fwd = _get_forwarder()
-        calldata_bytes = bytes.fromhex(calldata.removeprefix("0x"))
-        # Call estimateFee on the forwarder contract
-        fee_wei = fwd.functions.estimateFee(calldata_bytes).call()
-        fee_vsp = fee_wei / 1e18
-        # Get VSP price for USD display
-        try:
-            from fee_calculator import _get_vsp_price_usd
-            vsp_price = _get_vsp_price_usd(db)
-        except Exception:
-            vsp_price = 1.30
-        return {
-            "fee_vsp": round(fee_vsp, 6),
-            "fee_usd": round(fee_vsp * vsp_price, 4),
-            "fee_wei": str(fee_wei),
-            "vsp_price_usd": vsp_price,
-        }
+        return _get_forwarder().functions.estimateFee(calldata_bytes).call() / 1e18
     except Exception as e:
-        raise HTTPException(500, f"Fee estimation failed: {e}")
+        raise HTTPException(400, f"Forwarder rejects this call: {e}")
+
+
+def _gas_price_wei() -> int:
+    try:
+        return int(w3.eth.gas_price)
+    except Exception as e:
+        raise HTTPException(503, f"gas price unavailable: {e}")
+
+
+def _quote_or_503(gas_units: int, onchain_fee_vsp: float) -> dict:
+    try:
+        return quote_relay_fee(gas_units, _gas_price_wei(), onchain_fee_vsp)
+    except FeeOracleUnavailable as e:
+        raise HTTPException(503, f"fee oracle unavailable — try again shortly ({e})")
+
+
+@router.get("/api/relay/fee-policy")
+async def fee_policy():
+    """What the client needs to sign the standing fee allowance and to label the
+    quote: the collector (spender) address and the one knob."""
+    from config import RELAY_FEE_ENABLED, RELAY_FEE_MARKUP, RELAY_FEE_CAP_VSP
+    return {
+        "collector": _collector_address(),
+        "token": VSP_ADDRESS,
+        "enabled": RELAY_FEE_ENABLED,
+        "markup": RELAY_FEE_MARKUP,
+        "cap_vsp": RELAY_FEE_CAP_VSP,
+        "basis": "gas",  # fee = relay gas cost in VSP x (1 + markup); no floor, no percentage of value
+    }
+
+
+@router.get("/api/relay/estimate-fee")
+async def estimate_fee(to: str, calldata: str, from_: str | None = Query(None, alias="from"), db: Session = Depends(get_db)):
+    """The fee the relay will charge for this action, computed from gas, BEFORE
+    the user signs. Shown by the client; the client sends it back as
+    fee_quote_vsp and is never charged more than it displayed."""
+    from config import RELAY_FEE_COLLECT_GAS, RELAY_FEE_FORWARD_OVERHEAD_GAS
+    calldata_hex = calldata.removeprefix("0x")
+    try:
+        calldata_bytes = bytes.fromhex(calldata_hex)
+    except ValueError:
+        raise HTTPException(400, "calldata is not hex")
+    onchain = _onchain_fee_vsp(calldata_bytes)
+    action_type, _ = _detect_tx_type(calldata_hex, to)
+    inner_gas = None
+    if from_:
+        try:
+            inner_gas = int(w3.eth.estimate_gas({
+                "from": Web3.to_checksum_address(from_), "to": Web3.to_checksum_address(to),
+                "data": "0x" + calldata_hex,
+            }))
+        except Exception:
+            inner_gas = None  # allowance not granted yet, or the call would revert: use the default
+    if inner_gas is None:
+        inner_gas = _DEFAULT_INNER_GAS.get(action_type, 400_000)
+    gas_units = inner_gas + RELAY_FEE_FORWARD_OVERHEAD_GAS + RELAY_FEE_COLLECT_GAS
+    q = _quote_or_503(gas_units, onchain)
+    q.update({"action_type": action_type, "collector": _collector_address(), "valid_for_sec": 120,
+              "gas_estimated": inner_gas is not None})
+    # back-compat keys the old client read
+    q["fee_wei"] = str(int(round(q["fee_total_vsp"] * 1e18)))
+    return q
 
 # ── /api/relay/async (Bundle 4a) ────────────────────────────────────
 # Submits a meta-transaction and returns immediately with tx_hash and a
@@ -661,27 +722,54 @@ def _relay_async_sync(body: RelayRequest, db: Session):
                         logger.warning("Pre-flight: SettleFirst repair not started: %s", rep_err)
                 raise HTTPException(400, reason)
 
-        # On-chain fee verification (read what forwarder will charge)
+        # patch_relay_gas_fee: the relay's own gas-indexed quote, recomputed here with the
+        # real gas of Forwarder.execute; the user is never charged more than the client
+        # displayed (body.fee_quote_vsp). The Forwarder's own on-chain fee (0 once
+        # governance switched it off) is subtracted so the total equals the quote.
         user_addr = Web3.to_checksum_address(req.from_)
+        calldata_bytes = bytes.fromhex(calldata_hex)
+        onchain_fee_vsp = _onchain_fee_vsp(calldata_bytes)
+        onchain_fee_wei = int(round(onchain_fee_vsp * 1e18))
+        from config import RELAY_FEE_COLLECT_GAS, RELAY_FEE_FORWARD_OVERHEAD_GAS, RELAY_FEE_QUOTE_STALE_FACTOR
         try:
-            calldata_bytes = bytes.fromhex(calldata_hex)
-            fee_wei = fwd.functions.estimateFee(calldata_bytes).call()
+            exec_gas = int(fwd.functions.execute(request_data).estimate_gas({"from": _relay_account.address}))
         except Exception as e:
-            raise HTTPException(400, f'Forwarder rejects this call: {e}')
+            logger.info("execute gas estimate unavailable (%s); using the signed gas limit", str(e)[:80])
+            exec_gas = int(req.gas) + RELAY_FEE_FORWARD_OVERHEAD_GAS
+        quote = _quote_or_503(exec_gas + RELAY_FEE_COLLECT_GAS, onchain_fee_vsp)
+        fee_total_vsp = quote["fee_total_vsp"]
+        displayed = body.fee_quote_vsp
+        if displayed is not None and not _is_exempt:
+            if fee_total_vsp > float(displayed) * RELAY_FEE_QUOTE_STALE_FACTOR and float(displayed) >= 0:
+                raise HTTPException(400,
+                    f"fee quote expired: now {fee_total_vsp:.4f} VSP, displayed {float(displayed):.4f} — refresh and retry")
+            fee_total_vsp = min(fee_total_vsp, float(displayed))
+        if _is_exempt:
+            fee_total_vsp = 0.0
+        fee_charge_vsp = max(0.0, round(fee_total_vsp - onchain_fee_vsp, 6))
+        fee_charge_wei = int(round(fee_charge_vsp * 1e18))
 
         vsp_c = w3.eth.contract(
             address=Web3.to_checksum_address(VSP_ADDRESS), abi=_VSP_FEE_ABI)
         user_balance = vsp_c.functions.balanceOf(user_addr).call()
-        user_allowance = vsp_c.functions.allowance(
-            user_addr, Web3.to_checksum_address(FORWARDER_ADDRESS)).call()
-        if user_balance < fee_wei:
+        need_wei = fee_charge_wei + onchain_fee_wei
+        if user_balance < need_wei:
             raise HTTPException(400,
-                f'Insufficient VSP for relay fee: need {fee_wei / 1e18:.4f} VSP, '
+                f'Insufficient VSP for relay fee: need {need_wei / 1e18:.4f} VSP, '
                 f'have {user_balance / 1e18:.4f}')
-        if user_allowance < fee_wei:
-            raise HTTPException(400,
-                f'Insufficient VSP allowance for relay fee: need {fee_wei / 1e18:.4f} VSP, '
-                f'allowance {user_allowance / 1e18:.4f}. Sign a fee permit.')
+        if onchain_fee_wei > 0:  # transition: the Forwarder still pulls its own fee
+            fwd_allowance = vsp_c.functions.allowance(
+                user_addr, Web3.to_checksum_address(FORWARDER_ADDRESS)).call()
+            if fwd_allowance < onchain_fee_wei:
+                raise HTTPException(400,
+                    f'Insufficient VSP allowance for the Forwarder fee: need {onchain_fee_wei / 1e18:.4f} VSP, '
+                    f'allowance {fwd_allowance / 1e18:.4f}. Sign a fee permit.')
+        if fee_charge_wei > 0:
+            coll_allowance = vsp_c.functions.allowance(user_addr, _relay_account.address).call()
+            if coll_allowance < fee_charge_wei:
+                raise HTTPException(400,
+                    f'Insufficient VSP allowance for relay fee: need {fee_charge_vsp:.4f} VSP, '
+                    f'allowance {coll_allowance / 1e18:.4f}. Sign a fee permit.')
 
         # Build, sign, submit
         # F-1 (private disclosure 2026-09): NEVER forward native value from the
@@ -727,8 +815,13 @@ def _relay_async_sync(body: RelayRequest, db: Session):
             calldata=calldata_hex,
             action_type=action_type,
             action_value=action_value,
+            fee_quote_vsp=fee_total_vsp,                                   # patch_relay_gas_fee
+            fee_charge_vsp=fee_charge_vsp if tx_status == "submitted" else 0.0,
         )
         db.commit()
+        logger.info("relay fee quote: total=%.6f VSP (relay %.6f, on-chain %.6f) gas=%d gwei=%.3f avax=%.2f vsp=%.4f",
+                    fee_total_vsp, fee_charge_vsp, onchain_fee_vsp, quote["gas_units"],
+                    quote["gas_price_gwei"], quote["avax_price_usd"], quote["vsp_price_usd"])
 
         return {
             "tx_hash":      tx_hash,
@@ -736,6 +829,7 @@ def _relay_async_sync(body: RelayRequest, db: Session):
             "action_type":  action_type,
             "action_value": action_value,
             "status":       tx_status,
+            "fee_vsp":      fee_total_vsp,   # patch_relay_gas_fee: what the user pays (collected after confirmation)
         }
     except HTTPException:
         raise

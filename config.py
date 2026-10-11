@@ -278,11 +278,19 @@ print(f"  RPC_URL: {RPC_URL[:50]}...",               file=_sys_for_banner.stderr
 print(f"  DB: {_db_url_safe}",                       file=_sys_for_banner.stderr)
 
 
-# Relay fee configuration
-RELAY_FEE_MARGIN_PCT = float(os.getenv("RELAY_FEE_MARGIN_PCT", "0.30"))  # 30% margin on gas cost
-RELAY_FEE_MIN_VSP = float(os.getenv("RELAY_FEE_MIN_VSP", "0.1"))  # Minimum relay fee
-RELAY_FEE_TXN_PCT = float(os.getenv("RELAY_FEE_TXN_PCT", "0.01"))  # 1% of txn value
-AVAX_PRICE_USD = float(os.getenv("AVAX_PRICE_USD", "20.0"))  # Fallback AVAX price
+# Relay fee configuration — patch_relay_gas_fee (ruling 2026-10-11): the fee is the relay's
+# gas cost in VSP times ONE markup knob. No floor, no percentage of value. The Forwarder's
+# on-chain schedule is switched off by governance; the relay collects the fee itself
+# (fee_collector.py) after the action confirms. The old three knobs (margin / min / txn pct)
+# are gone, not zeroed, so nothing can drift back to a floor.
+RELAY_FEE_ENABLED = os.getenv("RELAY_FEE_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+RELAY_FEE_MARKUP = float(os.getenv("RELAY_FEE_MARKUP", "0.25"))          # the knob: cost 1.00 -> charge 1.25
+RELAY_FEE_CAP_VSP = float(os.getenv("RELAY_FEE_CAP_VSP", "5.0"))         # safety ceiling per action, not pricing
+RELAY_FEE_COLLECT_GAS = int(os.getenv("RELAY_FEE_COLLECT_GAS", "60000"))  # gas of the fee transferFrom, billed too
+RELAY_FEE_FORWARD_OVERHEAD_GAS = int(os.getenv("RELAY_FEE_FORWARD_OVERHEAD_GAS", "90000"))  # Forwarder.execute over the inner call (pre-signature quote)
+RELAY_FEE_QUOTE_STALE_FACTOR = float(os.getenv("RELAY_FEE_QUOTE_STALE_FACTOR", "1.5"))  # recomputed > displayed x this -> refuse, refresh
+RELAY_FEE_PRICE_MAX_AGE_SEC = int(os.getenv("RELAY_FEE_PRICE_MAX_AGE_SEC", "3600"))  # last-good price older than this -> refuse to quote
+AVAX_PRICE_USD = float(os.getenv("AVAX_PRICE_USD", "20.0"))  # Fallback AVAX price (oracle chain of last resort)
 
 # patch_bundle10_5_part2b_treasury_worker: base URL the treasury worker uses to reach the app's
 # read API (e.g. /api/mm/floor). Inside the docker network the worker
