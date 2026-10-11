@@ -290,6 +290,11 @@ RELAY_FEE_COLLECT_GAS = int(os.getenv("RELAY_FEE_COLLECT_GAS", "60000"))  # gas 
 RELAY_FEE_FORWARD_OVERHEAD_GAS = int(os.getenv("RELAY_FEE_FORWARD_OVERHEAD_GAS", "90000"))  # Forwarder.execute over the inner call (pre-signature quote)
 RELAY_FEE_QUOTE_STALE_FACTOR = float(os.getenv("RELAY_FEE_QUOTE_STALE_FACTOR", "1.5"))  # recomputed > displayed x this -> refuse, refresh
 RELAY_FEE_PRICE_MAX_AGE_SEC = int(os.getenv("RELAY_FEE_PRICE_MAX_AGE_SEC", "3600"))  # last-good price older than this -> refuse to quote
+# patch_relay_gas_fee_3: TEST-ONLY gas price for the quote. Fuji's gas is ~160 wei, so a Fuji quote is 0 VSP and the
+# collection path never runs there; the rehearsal sets this to a mainnet-like figure. REFUSED on mainnet.
+RELAY_FEE_GAS_PRICE_OVERRIDE_WEI = int(os.getenv("RELAY_FEE_GAS_PRICE_OVERRIDE_WEI", "0") or 0)
+if RELAY_FEE_GAS_PRICE_OVERRIDE_WEI and int(CHAIN_ID) == 43114:
+    raise RuntimeError("config.py: RELAY_FEE_GAS_PRICE_OVERRIDE_WEI is a testnet-only knob and must not be set on mainnet (43114)")
 AVAX_PRICE_USD = float(os.getenv("AVAX_PRICE_USD", "20.0"))  # Fallback AVAX price (oracle chain of last resort)
 
 # patch_bundle10_5_part2b_treasury_worker: base URL the treasury worker uses to reach the app's

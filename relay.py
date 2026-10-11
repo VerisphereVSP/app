@@ -497,7 +497,12 @@ def _gas_price_wei() -> int:
     """patch_relay_gas_fee_2: the price the relay will actually pay. sign_and_send
     (tx_signer) sends EIP-1559 with maxFeePerGas = baseFee + 1.5 × priority, so the
     quote uses the same figure; eth_gasPrice × 1.2 is its own legacy fallback. On
-    Fuji the base fee can sit near zero — the quote is then legitimately tiny."""
+    Fuji the base fee can sit near zero — the quote is then legitimately tiny.
+    patch_relay_gas_fee_3: RELAY_FEE_GAS_PRICE_OVERRIDE_WEI (testnet only, refused on
+    mainnet in config.py) replaces the read so the Fuji rehearsal exercises collection."""
+    from config import RELAY_FEE_GAS_PRICE_OVERRIDE_WEI
+    if RELAY_FEE_GAS_PRICE_OVERRIDE_WEI:
+        return int(RELAY_FEE_GAS_PRICE_OVERRIDE_WEI)
     try:
         base_fee = int(w3.eth.get_block("latest").baseFeePerGas)
         priority = int(w3.eth.max_priority_fee) * 150 // 100
