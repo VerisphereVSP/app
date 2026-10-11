@@ -141,6 +141,15 @@ class TestSubmissionRule:
     def test_exempt_pays_nothing(self):
         assert charge_rule(0.35, 0.35, 0.0, exempt=True) == (0.0, 0.0)
 
+    def test_quote_uses_the_price_the_relay_pays(self):
+        # patch_relay_gas_fee_2: EIP-1559 figure (baseFee + 1.5 x priority), as tx_signer sends; eth_gasPrice x 1.2 fallback
+        src = (ROOT / "relay.py").read_text()
+        i = src.index("def _gas_price_wei")
+        body = src[i:i + 1200]
+        assert "baseFeePerGas" in body and "max_priority_fee) * 150 // 100" in body and "gas_price) * 120 // 100" in body
+        gw = (ROOT / "relay_gateway.py").read_text()
+        assert '"feeCollector": _fee_collector()' in gw and '"basis": "gas"' in gw
+
     def test_relay_source_contains_the_rule(self):
         src = (ROOT / "relay.py").read_text()
         assert "fee_total_vsp = min(fee_total_vsp, float(displayed))" in src
