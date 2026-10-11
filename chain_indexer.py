@@ -1134,6 +1134,7 @@ def start_indexer():
                 try:
                     poll_events_atomic(db)
                     resolve_pending_txs(db)
+                    _collect_relay_fees(db)  # patch_relay_gas_fee
                 finally:
                     db.close()
             except Exception as e:
@@ -1274,6 +1275,21 @@ def _log_relay_gas(db, row, receipt):
     except Exception as e:
         logger.warning("relay_fee_log write skipped for %s: %s",
                        getattr(row, "tx_hash", "?"), e)
+
+
+def _collect_relay_fees(db):
+    """patch_relay_gas_fee: after the resolver has marked actions confirmed, the
+    relay collects its gas-indexed fee for them (fee_collector). Never raises
+    into the poll loop; a failed pass is retried next poll."""
+    try:
+        from fee_collector import collect_due_fees
+        out = collect_due_fees(db)
+        if out.get("collected") or out.get("failed"):
+            logger.info("relay fees: %s", out)
+    except Exception as e:
+        logger.warning("fee collection pass failed: %s", e)
+        try: db.rollback()
+        except Exception: pass
 
 
 def resolve_pending_txs(db):

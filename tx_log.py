@@ -34,6 +34,8 @@ def record_pending(
     calldata: str,
     action_type: str,
     action_value: Optional[float] = None,
+    fee_quote_vsp: Optional[float] = None,   # patch_relay_gas_fee: total shown to the user
+    fee_charge_vsp: Optional[float] = None,  # patch_relay_gas_fee: what the relay collects after confirmation
 ) -> int:
     """Insert a tx_log row with status='pending'. Returns the new row id.
 
@@ -49,15 +51,20 @@ def record_pending(
     result = db.execute(sql_text("""
         INSERT INTO tx_log
             (tx_hash, user_address, to_address, calldata,
-             action_type, action_value, status)
+             action_type, action_value, status,
+             fee_quote_vsp, fee_charge_vsp, fee_status)
         VALUES
-            (:txh, :user, :to_addr, :calld, :atype, :aval, 'pending')
+            (:txh, :user, :to_addr, :calld, :atype, :aval, 'pending',
+             :fq, :fc, :fs)
         ON CONFLICT (tx_hash) DO UPDATE
             SET tx_hash = EXCLUDED.tx_hash
         RETURNING id
     """), {
         "txh": txh, "user": user, "to_addr": to_addr, "calld": calld,
         "atype": action_type, "aval": action_value,
+        # patch_relay_gas_fee: a positive charge is collected once the action confirms
+        "fq": fee_quote_vsp, "fc": fee_charge_vsp,
+        "fs": "pending" if (fee_charge_vsp or 0) > 0 else "none",
     })
     row_id = result.scalar()
     return row_id
@@ -588,3 +595,49 @@ def get_user_notifications(
         "recent":      page,
         "next_cursor": next_cursor,
     }
+
+
+# ── patch_relay_gas_fee: fee collection bookkeeping ─────────────────────────
+
+def get_fees_due(db: Session, limit: int = 20, max_attempts: int = 5):
+    """Confirmed actions whose relay fee has not been collected yet."""
+    return db.execute(sql_text("""
+        SELECT id, tx_hash, user_address, fee_charge_vsp, fee_attempts
+        FROM tx_log
+        WHERE fee_status = 'pending' AND status = 'confirmed'
+          AND fee_charge_vsp > 0 AND fee_attempts < :ma
+        ORDER BY resolved_at ASC NULLS LAST, id ASC
+        LIMIT :lim
+    """), {"lim": limit, "ma": max_attempts}).fetchall()
+
+
+def waive_fees_for_failed(db: Session) -> int:
+    """A reverted or dropped action costs the user nothing."""
+    r = db.execute(sql_text("""
+        UPDATE tx_log SET fee_status = 'waived'
+        WHERE fee_status = 'pending' AND status IN ('reverted', 'dropped')
+    """))
+    return r.rowcount
+
+
+def mark_fee_collected(db: Session, tx_log_id: int, fee_tx_hash: str, amount_vsp: float) -> bool:
+    r = db.execute(sql_text("""
+        UPDATE tx_log SET fee_status = 'collected', fee_tx_hash = :fh, fee_error = NULL
+        WHERE id = :id AND fee_status = 'pending'
+    """), {"id": tx_log_id, "fh": fee_tx_hash})
+    if r.rowcount:
+        db.execute(sql_text("""
+            UPDATE relay_fee_log SET fee_charged_vsp = :amt
+            WHERE tx_hash = (SELECT tx_hash FROM tx_log WHERE id = :id)
+        """), {"amt": amount_vsp, "id": tx_log_id})
+    return r.rowcount > 0
+
+
+def mark_fee_attempt(db: Session, tx_log_id: int, error: str, final: bool) -> None:
+    db.execute(sql_text("""
+        UPDATE tx_log
+        SET fee_attempts = fee_attempts + 1,
+            fee_error = :err,
+            fee_status = CASE WHEN :final THEN 'failed' ELSE fee_status END
+        WHERE id = :id
+    """), {"id": tx_log_id, "err": (error or "")[:300], "final": final})
