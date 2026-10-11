@@ -150,6 +150,14 @@ class TestSubmissionRule:
         gw = (ROOT / "relay_gateway.py").read_text()
         assert '"feeCollector": _fee_collector()' in gw and '"basis": "gas"' in gw
 
+    def test_gas_price_override_is_testnet_only(self):
+        # patch_relay_gas_fee_3: the override replaces the read, and config refuses it on 43114
+        src = (ROOT / "relay.py").read_text()
+        i = src.index("def _gas_price_wei"); body = src[i:i + 1500]
+        assert "RELAY_FEE_GAS_PRICE_OVERRIDE_WEI" in body and body.index("OVERRIDE_WEI") < body.index("baseFeePerGas")
+        cfg = (ROOT / "config.py").read_text()
+        assert 'int(CHAIN_ID) == 43114' in cfg and "must not be set on mainnet" in cfg
+
     def test_relay_source_contains_the_rule(self):
         src = (ROOT / "relay.py").read_text()
         assert "fee_total_vsp = min(fee_total_vsp, float(displayed))" in src
