@@ -205,6 +205,10 @@ def _relay_config() -> Dict[str, Any]:
             "vspToken": VSP_ADDRESS.lower(),
             "forwarder": FORWARDER_ADDRESS.lower(),
         },
+        # patch_relay_gas_fee_2: the extension signs its standing fee allowance to the
+        # COLLECTOR (the relay wallet), not the Forwarder, and labels the quote with the knob.
+        "feeCollector": _fee_collector(),
+        "fee": {"basis": "gas", "markup": _fee_markup(), "quoteEndpoint": "/api/relay/estimate-fee"},
         "chain": {
             "chainId": hex(CHAIN_ID),
             "chainName": meta.get("chainName", f"Chain {CHAIN_ID}"),
@@ -214,6 +218,23 @@ def _relay_config() -> Dict[str, Any]:
         },
     }
     return _config_cache
+
+
+def _fee_collector() -> str:
+    """patch_relay_gas_fee_2: the relay wallet collects the fee (relay.py's permitted spender)."""
+    try:
+        from relay_wallet import account as _relay_account
+        return (_relay_account.address or "").lower()
+    except Exception:
+        return ""
+
+
+def _fee_markup() -> float:
+    try:
+        from config import RELAY_FEE_MARKUP
+        return float(RELAY_FEE_MARKUP)
+    except Exception:
+        return 0.25
 
 
 def invalidate_relay_config() -> None:

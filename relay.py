@@ -494,8 +494,20 @@ def _onchain_fee_vsp(calldata_bytes: bytes) -> float:
 
 
 def _gas_price_wei() -> int:
+    """patch_relay_gas_fee_2: the price the relay will actually pay. sign_and_send
+    (tx_signer) sends EIP-1559 with maxFeePerGas = baseFee + 1.5 × priority, so the
+    quote uses the same figure; eth_gasPrice × 1.2 is its own legacy fallback. On
+    Fuji the base fee can sit near zero — the quote is then legitimately tiny."""
     try:
-        return int(w3.eth.gas_price)
+        base_fee = int(w3.eth.get_block("latest").baseFeePerGas)
+        priority = int(w3.eth.max_priority_fee) * 150 // 100
+        price = base_fee + priority
+        if price > 0:
+            return price
+    except Exception:
+        pass
+    try:
+        return int(w3.eth.gas_price) * 120 // 100
     except Exception as e:
         raise HTTPException(503, f"gas price unavailable: {e}")
 
