@@ -83,6 +83,22 @@ class TestFormula:
         assert not hasattr(fc, "compute_relay_fee")
 
 
+class TestBilledGas:
+    # patch_relay_gas_fee_4: Avalanche bills max(used, limit / 2)
+    def test_half_limit_floor(self):
+        assert fc.billed_gas(1_000_000, 21_000) == 500_000       # the self-transfer that proved the rule
+        assert fc.billed_gas(1_600_000, 330_000) == 800_000      # tonight's stakes
+        assert fc.billed_gas(45_758, 45_376) == 45_376           # a tightly sized tx bills what it used
+
+    def test_relay_sizes_outer_limit_from_signed_gas(self):
+        src = (ROOT / "relay.py").read_text()
+        assert '"gas":   req.gas + 800_000' not in src
+        assert '"gas":   outer_limit' in src and "outer_limit = int(req.gas) + RELAY_OUTER_GAS_OVERHEAD" in src
+        assert "_billed_gas(outer_limit, exec_gas)" in src and '"gas_suggest": gas_suggest' in src
+        cfg = (ROOT / "config.py").read_text()
+        assert 'RELAY_OUTER_GAS_OVERHEAD' in cfg and 'RELAY_REQUEST_GAS_MARGIN' in cfg
+
+
 class TestOracle:
     def test_refuses_without_vsp_price(self, monkeypatch):
         def boom(db=None):

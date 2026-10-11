@@ -288,6 +288,13 @@ RELAY_FEE_MARKUP = float(os.getenv("RELAY_FEE_MARKUP", "0.25"))          # the k
 RELAY_FEE_CAP_VSP = float(os.getenv("RELAY_FEE_CAP_VSP", "5.0"))         # safety ceiling per action, not pricing
 RELAY_FEE_COLLECT_GAS = int(os.getenv("RELAY_FEE_COLLECT_GAS", "60000"))  # gas of the fee transferFrom, billed too
 RELAY_FEE_FORWARD_OVERHEAD_GAS = int(os.getenv("RELAY_FEE_FORWARD_OVERHEAD_GAS", "90000"))  # Forwarder.execute over the inner call (pre-signature quote)
+# patch_relay_gas_fee_4: Avalanche bills max(gas used, gas limit / 2) — proven 2026-10-11 by a 21,000-gas self-transfer
+# with a 1,000,000 limit billed at 500,000 (Fuji tx 0x93201ba4…). So the outer limit is the signed request gas plus a
+# fixed overhead (the Forwarder must be able to forward the full signed gas, OpenZeppelin burns everything otherwise),
+# not the old "+800,000"; and the client is told what gas to sign (estimate × margin) instead of a constant.
+RELAY_OUTER_GAS_OVERHEAD = int(os.getenv("RELAY_OUTER_GAS_OVERHEAD", "150000"))   # outer tx limit = request.gas + this
+RELAY_REQUEST_GAS_MARGIN = float(os.getenv("RELAY_REQUEST_GAS_MARGIN", "1.3"))   # suggested request.gas = inner estimate × this
+RELAY_REQUEST_GAS_MIN = int(os.getenv("RELAY_REQUEST_GAS_MIN", "150000"))         # never suggest less than this
 RELAY_FEE_QUOTE_STALE_FACTOR = float(os.getenv("RELAY_FEE_QUOTE_STALE_FACTOR", "1.5"))  # recomputed > displayed x this -> refuse, refresh
 RELAY_FEE_PRICE_MAX_AGE_SEC = int(os.getenv("RELAY_FEE_PRICE_MAX_AGE_SEC", "3600"))  # last-good price older than this -> refuse to quote
 # patch_relay_gas_fee_3: TEST-ONLY gas price for the quote. Fuji's gas is ~160 wei, so a Fuji quote is 0 VSP and the

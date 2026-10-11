@@ -18,7 +18,7 @@ from web3.logs import DISCARD
 from config import FORWARDER_ADDRESS, POST_REGISTRY_ADDRESS
 from db import get_db
 from relay_wallet import w3, account as _relay_account, sign_and_send, TxRevertedError  # patch_bundle10_relay_key_separation
-from fee_calculator import is_fee_exempt, quote_relay_fee, FeeOracleUnavailable  # patch_relay_gas_fee
+from fee_calculator import is_fee_exempt, quote_relay_fee, FeeOracleUnavailable, billed_gas as _billed_gas  # patch_relay_gas_fee / _4
 from config import VSP_ADDRESS  # patch_bundle10_relay_key_separation: dropped unused MM fee-wallet alias
 from moderation import check_content
 from rate_limit import relay_rate_limit
@@ -561,12 +561,18 @@ async def estimate_fee(to: str, calldata: str, from_: str | None = Query(None, a
             }))
         except Exception:
             inner_gas = None  # allowance not granted yet, or the call would revert: use the default
+    estimated = inner_gas is not None
     if inner_gas is None:
         inner_gas = _DEFAULT_INNER_GAS.get(action_type, 400_000)
-    gas_units = inner_gas + RELAY_FEE_FORWARD_OVERHEAD_GAS + RELAY_FEE_COLLECT_GAS
+    # patch_relay_gas_fee_4: the gas the client should SIGN (request.gas) — estimate × margin, never below the
+    # minimum — and the gas the chain will bill: max(used, limit / 2) for the execute tx plus the collection tx.
+    from config import RELAY_OUTER_GAS_OVERHEAD, RELAY_REQUEST_GAS_MARGIN, RELAY_REQUEST_GAS_MIN
+    gas_suggest = max(int(inner_gas * RELAY_REQUEST_GAS_MARGIN), RELAY_REQUEST_GAS_MIN)
+    outer_limit = gas_suggest + RELAY_OUTER_GAS_OVERHEAD
+    gas_units = _billed_gas(outer_limit, inner_gas + RELAY_FEE_FORWARD_OVERHEAD_GAS) + _billed_gas(RELAY_FEE_COLLECT_GAS, RELAY_FEE_COLLECT_GAS)
     q = _quote_or_503(gas_units, onchain)
     q.update({"action_type": action_type, "collector": _collector_address(), "valid_for_sec": 120,
-              "gas_estimated": inner_gas is not None})
+              "gas_estimated": estimated, "gas_suggest": gas_suggest, "outer_limit": outer_limit})
     # back-compat keys the old client read
     q["fee_wei"] = str(int(round(q["fee_total_vsp"] * 1e18)))
     return q
@@ -747,13 +753,17 @@ def _relay_async_sync(body: RelayRequest, db: Session):
         calldata_bytes = bytes.fromhex(calldata_hex)
         onchain_fee_vsp = _onchain_fee_vsp(calldata_bytes)
         onchain_fee_wei = int(round(onchain_fee_vsp * 1e18))
-        from config import RELAY_FEE_COLLECT_GAS, RELAY_FEE_FORWARD_OVERHEAD_GAS, RELAY_FEE_QUOTE_STALE_FACTOR
+        from config import (RELAY_FEE_COLLECT_GAS, RELAY_FEE_FORWARD_OVERHEAD_GAS, RELAY_FEE_QUOTE_STALE_FACTOR,
+                            RELAY_OUTER_GAS_OVERHEAD)
         try:
             exec_gas = int(fwd.functions.execute(request_data).estimate_gas({"from": _relay_account.address}))
         except Exception as e:
             logger.info("execute gas estimate unavailable (%s); using the signed gas limit", str(e)[:80])
             exec_gas = int(req.gas) + RELAY_FEE_FORWARD_OVERHEAD_GAS
-        quote = _quote_or_503(exec_gas + RELAY_FEE_COLLECT_GAS, onchain_fee_vsp)
+        # patch_relay_gas_fee_4: the outer limit is the signed request gas + a fixed overhead (the Forwarder must be
+        # able to forward the full signed gas); the chain bills max(used, limit / 2) — quote exactly that.
+        outer_limit = int(req.gas) + RELAY_OUTER_GAS_OVERHEAD
+        quote = _quote_or_503(_billed_gas(outer_limit, exec_gas) + _billed_gas(RELAY_FEE_COLLECT_GAS, RELAY_FEE_COLLECT_GAS), onchain_fee_vsp)
         fee_total_vsp = quote["fee_total_vsp"]
         displayed = body.fee_quote_vsp
         if displayed is not None and not _is_exempt:
@@ -795,7 +805,7 @@ def _relay_async_sync(body: RelayRequest, db: Session):
         tx = fwd.functions.execute(request_data).build_transaction({
             "from": _relay_account.address,  # patch_bundle10_relay_key_separation
             "value": 0,
-            "gas":   req.gas + 800_000,
+            "gas":   outer_limit,  # patch_relay_gas_fee_4: was req.gas + 800_000 — billed at half the limit on Avalanche
         })
         # patch_bundle04_6_relay_revert_catch: catch on-chain revert so tx_log still records the hash.
         # The unified resolve_pending_txs / chain_indexer pipeline will see the
@@ -836,8 +846,8 @@ def _relay_async_sync(body: RelayRequest, db: Session):
             fee_charge_vsp=fee_charge_vsp if tx_status == "submitted" else 0.0,
         )
         db.commit()
-        logger.info("relay fee quote: total=%.6f VSP (relay %.6f, on-chain %.6f) gas=%d gwei=%.3f avax=%.2f vsp=%.4f",
-                    fee_total_vsp, fee_charge_vsp, onchain_fee_vsp, quote["gas_units"],
+        logger.info("relay fee quote: total=%.6f VSP (relay %.6f, on-chain %.6f) billed_gas=%d (exec est %d, outer limit %d) gwei=%.3f avax=%.2f vsp=%.4f",
+                    fee_total_vsp, fee_charge_vsp, onchain_fee_vsp, quote["gas_units"], exec_gas, outer_limit,
                     quote["gas_price_gwei"], quote["avax_price_usd"], quote["vsp_price_usd"])
 
         return {

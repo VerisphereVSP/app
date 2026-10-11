@@ -185,6 +185,13 @@ def _get_vsp_price_usd(db: Session = None) -> float:
     return recalled
 
 
+def billed_gas(limit: int, used_estimate: int) -> int:
+    """patch_relay_gas_fee_4: what Avalanche bills for a transaction — max(gas used, gas limit / 2).
+    Proven 2026-10-11: a 21,000-gas self-transfer with a 1,000,000 limit was billed 500,000
+    (Fuji 0x93201ba4…); the relay's stakes with a 1,600,000 limit were billed exactly 800,000."""
+    return max(int(used_estimate), int(limit) // 2)
+
+
 def quote_relay_fee(gas_units: int, gas_price_wei: int, onchain_fee_vsp: float = 0.0) -> dict:
     """The one formula. `gas_units` is the full relay cost in gas (execute +
     collection). `onchain_fee_vsp` is whatever the Forwarder still charges by
