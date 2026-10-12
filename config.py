@@ -297,6 +297,13 @@ RELAY_REQUEST_GAS_MARGIN = float(os.getenv("RELAY_REQUEST_GAS_MARGIN", "1.3"))  
 RELAY_REQUEST_GAS_MIN = int(os.getenv("RELAY_REQUEST_GAS_MIN", "150000"))         # never suggest less than this
 RELAY_FEE_QUOTE_STALE_FACTOR = float(os.getenv("RELAY_FEE_QUOTE_STALE_FACTOR", "1.5"))  # recomputed > displayed x this -> refuse, refresh
 RELAY_FEE_PRICE_MAX_AGE_SEC = int(os.getenv("RELAY_FEE_PRICE_MAX_AGE_SEC", "3600"))  # last-good price older than this -> refuse to quote
+# patch_relay_pause: a MANUAL pause for the relay — the automatic spend breaker (rate_limit.py) trips on budget; this
+# one is for the operator. Either knob pauses: RELAY_PAUSED=1 in env (needs an app restart) or the flag file present
+# (`docker exec verisphere-app-1 touch /tmp/relay.paused`, no restart; `rm` resumes). Paused: /api/relay/async answers
+# 503 with RELAY_PAUSE_MESSAGE; quotes, config and reads keep working; /api/relay/config reports "paused": true.
+RELAY_PAUSED = os.getenv("RELAY_PAUSED", "").strip().lower() in ("1", "true", "yes")
+RELAY_PAUSE_FILE = os.getenv("RELAY_PAUSE_FILE", "/tmp/relay.paused")
+RELAY_PAUSE_MESSAGE = os.getenv("RELAY_PAUSE_MESSAGE", "Verisphere's relay is paused for maintenance. Your tokens and positions are safe; nothing was submitted or charged. Please try again later.")
 # patch_relay_gas_fee_3: TEST-ONLY gas price for the quote. Fuji's gas is ~160 wei, so a Fuji quote is 0 VSP and the
 # collection path never runs there; the rehearsal sets this to a mainnet-like figure. REFUSED on mainnet.
 RELAY_FEE_GAS_PRICE_OVERRIDE_WEI = int(os.getenv("RELAY_FEE_GAS_PRICE_OVERRIDE_WEI", "0") or 0)
