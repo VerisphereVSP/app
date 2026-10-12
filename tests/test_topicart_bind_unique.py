@@ -35,10 +35,10 @@ def db(monkeypatch):
                 c.execute(text(stmt))
         # topic 1 already has article 1 (canonical); topic 2 is free
         c.execute(text("INSERT INTO topic VALUES (1,'governance',NULL),(2,'climate',NULL)"))
-        c.execute(text("INSERT INTO topic_article VALUES (1,'governance','Governance',1),(2,'gov-dupe','Governance again',NULL),(3,'climate','Climate',NULL)"))
-        # article 2's claims link to topic 1 (taken); article 3's to topic 2 (free)
-        c.execute(text("INSERT INTO article_section VALUES (20,2,0),(30,3,0)"))
-        c.execute(text("INSERT INTO article_sentence VALUES (200,20,6,0),(300,30,7,0)"))
+        c.execute(text("INSERT INTO topic_article VALUES (1,'governance','Governance',1),(2,'gov-dupe','Governance again',NULL),(3,'climate','Climate',NULL),(4,'climate-dupe','Climate again',NULL)"))
+        # article 2's claims link to topic 1 (taken); articles 3 AND 4 both to topic 2 (free) — only one may bind
+        c.execute(text("INSERT INTO article_section VALUES (20,2,0),(30,3,0),(40,4,0)"))
+        c.execute(text("INSERT INTO article_sentence VALUES (200,20,6,0),(300,30,7,0),(400,40,7,0)"))
         c.execute(text("INSERT INTO chain_claim_text VALUES (6,'Earth is round'),(7,'CO2 absorbs infrared')"))
         c.execute(text("INSERT INTO claim VALUES (60,'Earth is round'),(70,'CO2 absorbs infrared')"))
         c.execute(text("INSERT INTO claim_topic VALUES (60,1),(70,2)"))
@@ -56,12 +56,12 @@ def test_free_topic_bound_taken_topic_reported_pass_completes(db):
     res = tac.reconcile_topic_articles(db)
     assert "error" not in res, res                      # the pass no longer aborts
     rows = dict(db.execute(text("SELECT article_id, topic_id FROM topic_article ORDER BY article_id")).fetchall())
-    assert rows == {1: 1, 2: None, 3: 2}                # 3 bound to the free topic; 2 left an orphan
-    assert res["contested"] == 1
+    assert rows == {1: 1, 2: None, 3: 2, 4: None}       # 3 bound to the free topic; 2 and 4 left orphans
+    assert res["contested"] == 2                        # 2 contests topic 1; 4 now contests topic 2
 
 
 def test_contested_orphans_lists_the_pair(db):
-    assert [tuple(r) for r in tac.contested_orphans(db)] == [(2, 1, 1)]
+    assert [tuple(r) for r in tac.contested_orphans(db)] == [(2, 1, 1)]   # before any binding: only 2 is contested
 
 
 def test_old_binding_would_have_violated_the_constraint(db):

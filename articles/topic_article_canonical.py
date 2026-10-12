@@ -263,26 +263,41 @@ def _bind_unbound_articles(db: Session) -> int:
     This is the semantic binding that title-matching missed ("6" vs "6th")."""
     _CONTESTED.clear()
     # (1) claim-linkage binding
-    db.execute(sql_text(
-        "UPDATE topic_article AS ta SET topic_id = sub.topic_id "
-        "FROM ("
-        "  SELECT s.article_id, ct.topic_id, "
-        "         ROW_NUMBER() OVER (PARTITION BY s.article_id ORDER BY COUNT(*) DESC) AS rnk "
-        "  FROM (SELECT sec.article_id, asent.post_id "
-        "        FROM article_sentence asent "
-        "        JOIN article_section sec ON asent.section_id = sec.section_id "
-        "        WHERE asent.post_id IS NOT NULL) s "
-        "  JOIN chain_claim_text cct ON cct.post_id = s.post_id "
-        "  JOIN claim c ON c.claim_text = cct.claim_text "
-        "  JOIN claim_topic ct ON ct.claim_id = c.claim_id "
-        "  GROUP BY s.article_id, ct.topic_id) sub "
-        "WHERE sub.article_id = ta.article_id AND sub.rnk = 1 AND ta.topic_id IS NULL "
-        # patch_topicart_bind_unique: migration 311 made topic_article.topic_id UNIQUE, so binding an orphan to a
-        # topic that already has an article violated the constraint and aborted the whole hourly reconcile (prod,
-        # every hour since at least 2026-10-11). Bind only where the topic is free; contested orphans are reported.
-        "AND NOT EXISTS (SELECT 1 FROM topic_article x WHERE x.topic_id = sub.topic_id)"
-    ))
-    db.commit()
+    # patch_topicart_bind_unique: migration 311 made topic_article.topic_id UNIQUE, so binding an orphan to a topic
+    # that already has an article violated the constraint and aborted the whole hourly reconcile (prod, every hour
+    # since at least 2026-10-11). Bind only where the topic is free (NOT EXISTS) and only ONE orphan per topic in this
+    # statement (per_topic = 1 — two orphans pointing at the same free topic would collide inside the UPDATE itself,
+    # which is what dev showed on 2026-10-12 — patch_topicart_bind_unique_2). Contested orphans are reported, never bound. The step is also isolated
+    # in its own transaction so a surprise here cannot abort the rest of the pass.
+    try:
+        db.execute(sql_text(
+            "UPDATE topic_article AS ta SET topic_id = pick.topic_id "
+            "FROM ("
+            "  SELECT q.article_id, q.topic_id FROM ("
+            "    SELECT sub.article_id, sub.topic_id, "
+            "           ROW_NUMBER() OVER (PARTITION BY sub.topic_id ORDER BY sub.article_id) AS per_topic "
+            "    FROM ("
+            "      SELECT s.article_id, ct.topic_id, "
+            "             ROW_NUMBER() OVER (PARTITION BY s.article_id ORDER BY COUNT(*) DESC) AS rnk "
+            "      FROM (SELECT sec.article_id, asent.post_id "
+            "            FROM article_sentence asent "
+            "            JOIN article_section sec ON asent.section_id = sec.section_id "
+            "            WHERE asent.post_id IS NOT NULL) s "
+            "      JOIN chain_claim_text cct ON cct.post_id = s.post_id "
+            "      JOIN claim c ON c.claim_text = cct.claim_text "
+            "      JOIN claim_topic ct ON ct.claim_id = c.claim_id "
+            "      GROUP BY s.article_id, ct.topic_id) sub "
+            "    JOIN topic_article orphan ON orphan.article_id = sub.article_id AND orphan.topic_id IS NULL "
+            "    WHERE sub.rnk = 1 "
+            "      AND NOT EXISTS (SELECT 1 FROM topic_article x WHERE x.topic_id = sub.topic_id)"
+            "  ) q WHERE q.per_topic = 1"
+            ") pick "
+            "WHERE pick.article_id = ta.article_id AND ta.topic_id IS NULL"
+        ))
+        db.commit()
+    except Exception as e:  # pragma: no cover - defensive: never let binding abort the pass
+        db.rollback()
+        logger.warning("claim-linkage binding skipped this run: %s", e)
     # (2) centroid-summary binding for still-unbound (claim-less) articles
     from articles.claim_indexer import _article_summary_embedding
     unbound = db.execute(sql_text(
@@ -366,6 +381,9 @@ def reconcile_topic_articles(db: Session) -> dict:
                 _alert("topic_article_collapse_error", f"topic {topic_id} ({label}): {e}",
                        topic_id=topic_id)
         topics_after = db.execute(sql_text("SELECT COUNT(*) FROM topic")).scalar()
+        # patch_topicart_bind_unique_2: one INFO line per completed pass, so a healthy reconcile is visible in the log
+        logger.info("reconcile: pass complete — bound %d, contested %d, multi-article topics %d, collapsed %d, errors %d",
+                    bound, summary.get("contested", 0), summary["topics_scanned"], summary["collapsed"], summary["errors"])
         # INVARIANT: collapsing articles must NEVER change the number of topics.
         # If it did, we fused meanings — a far worse bug than the fan-out.
         if topics_after != topics_before:
