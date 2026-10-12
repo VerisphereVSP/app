@@ -247,7 +247,10 @@ def invalidate_relay_config() -> None:
 @public_endpoint("/api/relay/config", cost_tier="cheap")
 def relay_config(request: Request) -> Dict[str, Any]:
     """EIP-712 domains, addresses, posting fee and chain params for signing."""
-    return _relay_config()
+    # patch_relay_pause: "paused" is read live (the rest is cached) so clients can say why before asking for a signature.
+    from relay_pause import paused_reason
+    why = paused_reason()
+    return {**_relay_config(), "paused": why is not None, **({"pausedMessage": why} if why else {})}
 
 
 @router.post("/build")

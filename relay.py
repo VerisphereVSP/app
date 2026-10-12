@@ -22,6 +22,7 @@ from fee_calculator import is_fee_exempt, quote_relay_fee, FeeOracleUnavailable,
 from config import VSP_ADDRESS  # patch_bundle10_relay_key_separation: dropped unused MM fee-wallet alias
 from moderation import check_content
 from rate_limit import relay_rate_limit
+from relay_pause import refuse_if_paused as _refuse_if_paused  # patch_relay_pause
 from relay_guard import check_relay_request, GuardError, record_revert  # patch_f7rg_relay_guard_wirein
 
 logger = logging.getLogger(__name__)
@@ -597,6 +598,7 @@ async def estimate_fee(to: str, calldata: str, from_: str | None = Query(None, a
 @router.post("/api/relay/async")
 @relay_rate_limit
 async def relay_async(body: RelayRequest, request: Request, db: Session = Depends(get_db)):
+    _refuse_if_paused()  # patch_relay_pause: the operator's switch, checked before anything else runs
     _reject_value_and_unknown_target(body)  # F-1
     """Async relay: submit tx, record tx_log row, return immediately."""
     import asyncio
