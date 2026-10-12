@@ -380,33 +380,10 @@ async def main():
     asyncio.create_task(_emission_tripwire())
     print("emission tripwire scheduled (10m cadence, 24h window)", flush=True)
 
-    # patch_smax_keeper: S-03 layer (ii) operational half. Pokes core's
-    # permissionless StakeEngine.refreshSMax when a transaction would actually
-    # change state (I.4 deviation, or pending decay once per epoch); view calls
-    # only otherwise. Idles cleanly until KEEPER_KMS_KEY/KEEPER_ADDRESS are
-    # provisioned. Rationale, cost model, and rules: smax_keeper.py header.
-    import smax_keeper as _smk
-
-    async def _smax_keeper_loop():
-        await asyncio.sleep(55)  # initial delay; after startup + indexer settle
-        if _smk.is_configured():
-            print(f"sMax keeper started (keeper={_smk.keeper_address()}, "
-                  f"interval={_smk.KEEPER_INTERVAL_SEC}s, "
-                  f"top {_smk.KEEPER_CANDIDATES} posts, "
-                  f"max {_smk.KEEPER_MAX_POKES_PER_CYCLE} pokes/cycle)")
-        else:
-            print("sMax keeper: KEEPER_KMS_KEY/KEEPER_ADDRESS not set - keeper "
-                  "idle (provision like the RELAY/MM keys to enable; see "
-                  "smax_keeper.py header)")
-        while True:
-            try:
-                _smk.poll_once()
-            except Exception as e:
-                print(f"smax keeper error: {e}", flush=True)
-            await asyncio.sleep(_smk.KEEPER_INTERVAL_SEC)
-
-    asyncio.create_task(_smax_keeper_loop())
-    print("sMax keeper scheduled", flush=True)
+    # patch_worker_keeper_once (2026-10-12): the sMax keeper used to be scheduled TWICE — here (patch_smax_keeper,
+    # synchronous poll_once() ON the event loop, 55 s delay) and above (patch_mm_410, in a thread, 90 s delay). Prod
+    # logged every cycle twice ~18 s apart and the second copy blocked the loop for the duration of its RPC calls.
+    # The threaded loop above is the one that stays (its own else-branch already logs the idle state).
 
     # patch04b: keep-alive loop. The main indexer runs in a native
     # thread via start_indexer() and doesn't need to be awaited.

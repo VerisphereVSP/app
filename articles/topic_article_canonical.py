@@ -230,15 +230,41 @@ def collapse_topic(db: Session, topic_id: int) -> dict:
             "canonical": canon_id, "claims_preserved": len(claims)}
 
 
+_CONTESTED: list = []  # patch_topicart_bind_unique: (orphan article_id, topic_id, canonical article_id) per run
+
+
+def contested_orphans(db: Session):
+    """patch_topicart_bind_unique: orphans (topic_id NULL) whose claim-linked topic already has an article.
+    Reported, not bound: the unique constraint (migration 311) forbids a second article per topic, and merging
+    an orphan's claims into the canonical article is collapse_topic's job in a follow-up."""
+    return db.execute(sql_text(
+        "SELECT sub.article_id, sub.topic_id, x.article_id AS canonical FROM ("
+        "  SELECT s.article_id, ct.topic_id, "
+        "         ROW_NUMBER() OVER (PARTITION BY s.article_id ORDER BY COUNT(*) DESC) AS rnk "
+        "  FROM (SELECT sec.article_id, asent.post_id "
+        "        FROM article_sentence asent "
+        "        JOIN article_section sec ON asent.section_id = sec.section_id "
+        "        WHERE asent.post_id IS NOT NULL) s "
+        "  JOIN chain_claim_text cct ON cct.post_id = s.post_id "
+        "  JOIN claim c ON c.claim_text = cct.claim_text "
+        "  JOIN claim_topic ct ON ct.claim_id = c.claim_id "
+        "  GROUP BY s.article_id, ct.topic_id) sub "
+        "JOIN topic_article ta ON ta.article_id = sub.article_id AND ta.topic_id IS NULL "
+        "JOIN topic_article x ON x.topic_id = sub.topic_id "
+        "WHERE sub.rnk = 1"
+    )).fetchall()
+
+
 def _bind_unbound_articles(db: Session) -> int:
     """Bind any topic_article with NULL topic_id to a topic. Priority:
     (1) the topic its staked claims link to (claim_topic, centroid-based);
     (2) for claim-less articles, the topic whose centroid is nearest the
     article's summary embedding. Never binds by title string. Returns count bound.
     This is the semantic binding that title-matching missed ("6" vs "6th")."""
+    _CONTESTED.clear()
     # (1) claim-linkage binding
     db.execute(sql_text(
-        "UPDATE topic_article ta SET topic_id = sub.topic_id "
+        "UPDATE topic_article AS ta SET topic_id = sub.topic_id "
         "FROM ("
         "  SELECT s.article_id, ct.topic_id, "
         "         ROW_NUMBER() OVER (PARTITION BY s.article_id ORDER BY COUNT(*) DESC) AS rnk "
@@ -250,7 +276,11 @@ def _bind_unbound_articles(db: Session) -> int:
         "  JOIN claim c ON c.claim_text = cct.claim_text "
         "  JOIN claim_topic ct ON ct.claim_id = c.claim_id "
         "  GROUP BY s.article_id, ct.topic_id) sub "
-        "WHERE sub.article_id = ta.article_id AND sub.rnk = 1 AND ta.topic_id IS NULL"
+        "WHERE sub.article_id = ta.article_id AND sub.rnk = 1 AND ta.topic_id IS NULL "
+        # patch_topicart_bind_unique: migration 311 made topic_article.topic_id UNIQUE, so binding an orphan to a
+        # topic that already has an article violated the constraint and aborted the whole hourly reconcile (prod,
+        # every hour since at least 2026-10-11). Bind only where the topic is free; contested orphans are reported.
+        "AND NOT EXISTS (SELECT 1 FROM topic_article x WHERE x.topic_id = sub.topic_id)"
     ))
     db.commit()
     # (2) centroid-summary binding for still-unbound (claim-less) articles
@@ -269,6 +299,12 @@ def _bind_unbound_articles(db: Session) -> int:
                 "ORDER BY centroid <=> (:v)::vector ASC LIMIT 1"
             ), {"v": str(list(vec))}).fetchone()
             if row:
+                # patch_topicart_bind_unique: one article per topic (migration 311) — a taken topic is contested
+                taken = db.execute(sql_text(
+                    "SELECT article_id FROM topic_article WHERE topic_id = :t"), {"t": row[0]}).fetchone()
+                if taken:
+                    _CONTESTED.append((aid, row[0], taken[0]))
+                    continue
                 db.execute(sql_text(
                     "UPDATE topic_article SET topic_id = :t WHERE article_id = :a"
                 ), {"t": row[0], "a": aid})
@@ -302,6 +338,12 @@ def reconcile_topic_articles(db: Session) -> dict:
         bound = _bind_unbound_articles(db)
         if bound:
             logger.info("reconcile: bound %d previously-unbound articles", bound)
+        # patch_topicart_bind_unique: orphans whose topic is taken are reported once per run, never bound
+        contested = list(contested_orphans(db)) + list(_CONTESTED)
+        summary["contested"] = len(contested)
+        if contested:
+            logger.warning("reconcile: %d orphan article(s) contest a topic that already has an article: %s",
+                           len(contested), ", ".join(f"article {a} -> topic {t} (canonical {c})" for a, t, c in contested))
         multi = find_multi_article_topics(db)
         summary["topics_scanned"] = len(multi)
         if not RECONCILE_ENABLED:
