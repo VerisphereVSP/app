@@ -57,8 +57,13 @@ def _wei_to_vsp(wei: int) -> float:
     return wei / 1e18
 
 
-def _moderate_text(text: str) -> str:
-    """Return text if clean, or a placeholder if blocked."""
+def _moderate_text(text: str, post_id: int | None = None, db: Session | None = None) -> str:
+    """Return text if clean, or a placeholder if blocked by the content filter or hidden by an admin
+    (patch_report_path: the admin takedown is checked first and needs the post id and a session)."""
+    if post_id is not None and db is not None:
+        from claim_hide import mask, HIDDEN_PLACEHOLDER
+        if mask(text, post_id, db) == HIDDEN_PLACEHOLDER:
+            return HIDDEN_PLACEHOLDER
     mod = check_content_fast(text)
     if mod.allowed:
         return text
@@ -88,7 +93,7 @@ def claim_summary(post_id: int, db: Session = Depends(get_db)):
     total = info["support_total"] + info["challenge_total"]
     return {
         "post_id": post_id,
-        "text": _moderate_text(text),
+        "text": _moderate_text(text, post_id, db),
         "stake_support": round(info["support_total"], 4),
         "stake_challenge": round(info["challenge_total"], 4),
         "total_stake": round(total, 4),
@@ -160,7 +165,7 @@ def claim_edges(post_id: int, db: Session = Depends(get_db)):
             "link_post_id": link_pid,
             "is_challenge": edge["is_challenge"],
             "edge_contribution": compute_edge_contribution(db, target_post_id, link_pid),
-            "claim_text": _moderate_text(edge.get("claim_text", "")),
+            "claim_text": _moderate_text(edge.get("claim_text", ""), claim_pid, db),
             "claim_vs": round(edge.get("claim_vs", 0), 2),
             "claim_support": round(edge.get("claim_support", 0), 4),
             "claim_challenge": round(edge.get("claim_challenge", 0), 4),
@@ -212,7 +217,7 @@ def search_claims(q: str = "", limit: int = 50, include_links: bool = False, db:
 
         claims.append({
             "post_id": p["post_id"],
-            "text": _moderate_text(p["text"]),
+            "text": _moderate_text(p["text"], p["post_id"], db),
             "creator": p.get("creator", ""),
             "verity_score": round(p["verity_score"], 2),
             "stake_support": round(p["support_total"], 4),
@@ -320,7 +325,7 @@ def claims_fast(limit: int = 500, include_links: bool = True, db: Session = Depe
             "post_id": p["post_id"],
             "content_type": p.get("content_type", 0),
             "is_link": is_link,
-            "text": _moderate_text(p["text"]) if not is_link else "",
+            "text": _moderate_text(p["text"], p["post_id"], db) if not is_link else "",
             "creator": p.get("creator", ""),
             "verity_score": round(p["verity_score"], 2),
             "base_vs": round(p.get("base_vs", 0), 2),
@@ -362,8 +367,8 @@ def claims_fast(limit: int = 500, include_links: bool = True, db: Session = Depe
             entry["from_post_id"] = m["from_post_id"]
             entry["to_post_id"] = m["to_post_id"]
             entry["is_challenge"] = m["is_challenge"]
-            entry["from_text"] = _moderate_text(m["from_text"])
-            entry["to_text"] = _moderate_text(m["to_text"])
+            entry["from_text"] = _moderate_text(m["from_text"], m["from_post_id"], db)
+            entry["to_text"] = _moderate_text(m["to_text"], m["to_post_id"], db)
             # For sorting purposes, use the target claim text
             entry["text"] = entry["to_text"]
         
