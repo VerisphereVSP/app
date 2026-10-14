@@ -294,6 +294,42 @@ def update_cost(cost_key: str, monthly_usd: float, request: Request = None, db: 
     invalidate_cache()
     return {"ok": True}
 
+# ── patch_report_path: operator takedown (hide / unhide a claim's text in every app view) ─────────────────────────
+class _HideBody(BaseModel):
+    reason: str = Field("", max_length=500)
+
+
+@app.post("/api/admin/claims/{post_id}/hide")
+def admin_hide_claim(post_id: int, body: _HideBody | None = None, request: Request = None, db: Session = Depends(get_db)):
+    """Hide a claim's text from the app (the chain record and its stakes are untouched). X-Admin-Key; audited."""
+    reason = (body.reason if body else "") or ""
+    require_admin(request, db=db, action="hide_claim", params={"post_id": post_id, "reason": reason[:120]})
+    from claim_hide import set_hidden
+    if not set_hidden(db, post_id, True, reason):
+        raise HTTPException(404, f"Post {post_id} has no indexed claim text")
+    return {"ok": True, "post_id": post_id, "hidden": True}
+
+
+@app.post("/api/admin/claims/{post_id}/unhide")
+def admin_unhide_claim(post_id: int, request: Request = None, db: Session = Depends(get_db)):
+    """Restore a hidden claim's text. X-Admin-Key; audited."""
+    require_admin(request, db=db, action="unhide_claim", params={"post_id": post_id})
+    from claim_hide import set_hidden
+    if not set_hidden(db, post_id, False, None):
+        raise HTTPException(404, f"Post {post_id} has no indexed claim text")
+    return {"ok": True, "post_id": post_id, "hidden": False}
+
+
+@app.get("/api/admin/claims/hidden")
+def admin_hidden_claims(request: Request = None, db: Session = Depends(get_db)):
+    """The hidden list with reasons and times. X-Admin-Key (read; not audited)."""
+    require_admin(request)
+    rows = db.execute(sql_text(
+        "SELECT post_id, admin_hidden_reason, admin_hidden_at FROM chain_claim_text WHERE admin_hidden ORDER BY admin_hidden_at DESC"
+    )).fetchall()
+    return {"hidden": [{"post_id": r[0], "reason": r[1], "hidden_at": r[2].isoformat() if r[2] else None} for r in rows]}
+
+
 @app.post("/api/fees/params")
 def update_fee_param(param_key: str, value: str, request: Request = None, db: Session = Depends(get_db)):
     require_admin(request, db=db, action="update_fee_param", params={"param_key": param_key, "value": value})
