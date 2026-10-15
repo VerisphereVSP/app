@@ -195,6 +195,28 @@ def _set_cursor_epoch(epoch: int):
         sess.close()
 
 
+def _record_check(epoch: int, smax, pokes: int, reason: str) -> None:
+    """patch_smax_keeper_check: one ops_metrics row per completed cycle, pokes or not —
+    metric 'smax_keeper_check', value = pokes sent this cycle, labels {epoch, smax_vsp, reason}.
+    The dashboard's "sMax keeper" panel reads its age (silent keeper = red); the decay-poke
+    cursor it used to read only moves when a poke is needed, so it read red for days of
+    honest "nothing to do". Never raises (instrumentation must not break the keeper)."""
+    try:
+        from balance_sampler import record_metric
+        from db import get_session_factory
+        db = get_session_factory()()
+        try:
+            record_metric(db, "smax_keeper_check", pokes, {
+                "epoch": int(epoch),
+                "smax_vsp": (None if smax is None else round(int(smax) / 1e18, 6)),
+                "reason": (reason or "")[:120]})
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("smax_keeper: check metric not recorded: %s", e)
+
+
 def _check_gas_balance():
     """WARN + alert when the keeper EOA runs low on gas. Never raises."""
     try:
@@ -263,6 +285,7 @@ def poll_once():
     pids = _db_candidates(KEEPER_CANDIDATES)
     if not pids:
         logger.info("smax_keeper: no posts indexed yet; nothing to do")
+        _record_check(current_epoch, None, 0, "no posts indexed yet")  # patch_smax_keeper_check
         return
 
     # Every decision input re-read from chain (DB was only the shortlist).
@@ -285,10 +308,12 @@ def poll_once():
             if pokes == 0:
                 logger.info("smax_keeper: %s (sMax=%d, epoch=%d)",
                             reason, smax, current_epoch)
+            _record_check(current_epoch, smax, pokes, reason)  # patch_smax_keeper_check
             return
         ok = _poke(pid, reason)
         pokes += 1
         if not ok:
+            _record_check(current_epoch, smax, pokes, f"poke failed: post {pid}")  # patch_smax_keeper_check
             return  # don't hammer a failing path; alert already sent
         if action == "decay":
             _set_cursor_epoch(current_epoch)
@@ -303,3 +328,4 @@ def poll_once():
             pass
     logger.warning("smax_keeper: poke cap (%d) reached this cycle; will re-check "
                    "next cycle", KEEPER_MAX_POKES_PER_CYCLE)
+    _record_check(current_epoch, smax, pokes, "poke cap reached; re-check next cycle")  # patch_smax_keeper_check
