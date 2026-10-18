@@ -44,6 +44,7 @@ from semantic_dedup import router as semantic_dedup_router
 from claim_locate import router as claim_locate_router
 from claim_atomicity import router as claim_atomicity_router
 from relay_gateway import router as relay_gateway_router
+from pool_trade import router as pool_trade_router  # patch_pool_trade: buy/sell VSP with AVAX or USDC
 from rate_limit import RateLimitMiddleware, cleanup_rate_limiter, _client_ip as _rl_client_ip, TRUSTED_PROXY_HOPS as _TRUSTED_PROXY_HOPS
 
 
@@ -193,6 +194,7 @@ app.include_router(semantic_dedup_router)
 app.include_router(claim_locate_router)
 app.include_router(claim_atomicity_router)
 app.include_router(relay_gateway_router)
+app.include_router(pool_trade_router)  # patch_pool_trade
 
 ADDRESSES_PATH = Path(f"/app/broadcast/Deploy.s.sol/{CHAIN_ID}/addresses.json")
 
@@ -601,6 +603,10 @@ def pool_price():
         print(f"pool/price read failed: {e}")
         raise HTTPException(503, "pool read failed")
     out = {"configured": True, "swap_url": SWAP_URL, **state}
+    # patch_pool_trade: the wrapped-native address and the trade endpoints, so clients hard-code no addresses
+    from pool_trade import WAVAX_ADDRESS as _wavax, configured as _trade_ok
+    out["wavax"] = _wavax.lower() or None
+    out["trade"] = {"configured": _trade_ok(), "routes": "/api/pool/routes", "quote": "/api/pool/quote", "build": "/api/pool/build"}
     try:
         out["vsp_circulating"] = read_vsp_circulating_v2()
     except Exception as e:
