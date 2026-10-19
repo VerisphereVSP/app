@@ -212,9 +212,13 @@ def _constrain_permit(permit, from_addr: str) -> None:
         return
     from config import VSP_TOKEN_ADDRESS, POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, DEPLOYED
     fwd_addr = (DEPLOYED.get("Forwarder") or os.getenv("FORWARDER_ADDRESS", "") or "").lower()
-    # patch_relay_gas_fee: the relay wallet is the fee collector; its allowance is the standing fee permit
-    collector = (_relay_account.address or "").lower()
-    spenders = {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, fwd_addr, collector) if a}
+    # patch_relay_gas_fee: the fee collector's allowance is the standing fee permit. patch_fee_collector: the
+    # advertised collector is the FeeCollector contract once deployed; a permit naming the relay wallet (what a
+    # client that loaded its config before the switch still asks for) stays accepted during the transition — every
+    # existing user already holds that allowance, and such a user is collected the legacy way until they re-permit.
+    collector = _collector_address().lower()
+    legacy = (_relay_account.address or "").lower()
+    spenders = {a.lower() for a in (POST_REGISTRY_ADDRESS, STAKE_ENGINE_ADDRESS, fwd_addr, collector, legacy) if a}
     if (permit.token or "").lower() != (VSP_TOKEN_ADDRESS or "").lower():
         raise HTTPException(400, "Permit token must be the VSP token")
     if (permit.spender or "").lower() not in spenders:
@@ -481,7 +485,9 @@ _DEFAULT_INNER_GAS = {"claim": 450_000, "link": 350_000, "stake": 300_000, "with
 
 
 def _collector_address() -> str:
-    return _relay_account.address
+    """patch_fee_collector: the FeeCollector contract when deployed, else the relay wallet (legacy)."""
+    from config import FEE_COLLECTOR_ADDRESS
+    return FEE_COLLECTOR_ADDRESS if FEE_COLLECTOR_ADDRESS else _relay_account.address
 
 
 def _onchain_fee_vsp(calldata_bytes: bytes) -> float:

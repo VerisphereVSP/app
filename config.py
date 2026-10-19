@@ -287,6 +287,12 @@ RELAY_FEE_ENABLED = os.getenv("RELAY_FEE_ENABLED", "true").strip().lower() in ("
 RELAY_FEE_MARKUP = float(os.getenv("RELAY_FEE_MARKUP", "0.25"))          # the knob: cost 1.00 -> charge 1.25
 RELAY_FEE_CAP_VSP = float(os.getenv("RELAY_FEE_CAP_VSP", "5.0"))         # safety ceiling per action, not pricing
 RELAY_FEE_COLLECT_GAS = int(os.getenv("RELAY_FEE_COLLECT_GAS", "60000"))  # gas of the fee transferFrom, billed too
+# patch_fee_collector: the FeeCollector CONTRACT (core/src/FeeCollector.sol) is the spender users permit for relay
+# fees — a verified contract instead of the relay EOA, bounded per call and per user per day, Guardian-pausable,
+# Timelock-governed. Set once deployed (env FEE_COLLECTOR_ADDRESS, or "FeeCollector" in deployments/<network>.json);
+# empty = legacy behaviour (the relay wallet is the spender and calls transferFrom itself).
+FEE_COLLECTOR_ADDRESS = (os.getenv("FEE_COLLECTOR_ADDRESS", "") or DEPLOYED.get("FeeCollector", "") or "").strip()
+RELAY_FEE_COLLECT_GAS_CONTRACT = int(os.getenv("RELAY_FEE_COLLECT_GAS_CONTRACT", "90000"))  # FeeCollector.collect: transferFrom + window + event
 RELAY_FEE_FORWARD_OVERHEAD_GAS = int(os.getenv("RELAY_FEE_FORWARD_OVERHEAD_GAS", "90000"))  # Forwarder.execute over the inner call (pre-signature quote)
 # patch_relay_gas_fee_4: Avalanche bills max(gas used, gas limit / 2) — proven 2026-10-11 by a 21,000-gas self-transfer
 # with a 1,000,000 limit billed at 500,000 (Fuji tx 0x93201ba4…). So the outer limit is the signed request gas plus a

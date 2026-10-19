@@ -10,8 +10,15 @@ the relay wallet, which the user has authorised with a standing EIP-2612
 allowance (the "collector" allowance signed in the client). Reverted or dropped
 actions are waived — the user never pays for a failure.
 
-No contract carries any fee knowledge: the amount is the relay's own quote and
-the only on-chain bound is the user's allowance to the relay address.
+No contract carries any fee knowledge: the amount is the relay's own quote.
+patch_fee_collector: with FEE_COLLECTOR_ADDRESS set, the relay calls
+FeeCollector.collect(user, amount, ref) — the user's allowance names that
+verified contract, which caps every call (5 VSP) and every user per day
+(25 VSP) and can be paused by the Guardian. A user whose allowance still names
+the relay wallet (permitted before the switch) is collected the legacy way
+(transferFrom) until their next action re-permits the contract; clients learn
+the new spender from /relay/config and /relay/fee-policy, and a permit naming
+the relay wallet from a not-yet-reloaded client is still accepted meanwhile.
 
 Failure policy: a collection that reverts (allowance revoked, balance gone)
 counts as an attempt; after MAX_ATTEMPTS the row is 'failed' and left for the
@@ -36,7 +43,41 @@ _TRANSFER_FROM_ABI = [{
                {"name": "value", "type": "uint256"}],
     "name": "transferFrom", "outputs": [{"type": "bool"}],
     "stateMutability": "nonpayable", "type": "function",
+}, {
+    "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}],
+    "name": "allowance", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function",
 }]
+# patch_fee_collector: core/src/FeeCollector.sol
+_FEE_COLLECTOR_ABI = [{
+    "inputs": [{"name": "user", "type": "address"}, {"name": "amount", "type": "uint256"}, {"name": "ref", "type": "bytes32"}],
+    "name": "collect", "outputs": [], "stateMutability": "nonpayable", "type": "function",
+}, {
+    "inputs": [], "name": "paused", "outputs": [{"type": "bool"}], "stateMutability": "view", "type": "function",
+}]
+
+
+def collect_route(fee_collector: str, allowance_contract: int, allowance_legacy: int, amount_wei: int) -> str:
+    """Pure: which path collects this fee. 'contract' when the FeeCollector is deployed and the user's allowance
+    to it covers the fee; 'legacy' (relay-wallet transferFrom) only while the contract is unset, or for a user
+    whose allowance still names the relay wallet and not yet the contract; 'none' when neither can pay (the
+    attempt is still made on the preferred path so the revert is recorded)."""
+    if not fee_collector:
+        return "legacy"
+    if allowance_contract >= amount_wei:
+        return "contract"
+    if allowance_legacy >= amount_wei:
+        return "legacy"
+    return "contract"
+
+
+def _ref_bytes32(tx_hash: str) -> bytes:
+    """The relayed action's tx hash as the FeeCollected ref (zero-padded if shorter)."""
+    h = (tx_hash or "").lower().removeprefix("0x")
+    try:
+        b = bytes.fromhex(h)
+    except ValueError:
+        b = b""
+    return b[:32].rjust(32, b"\0")
 
 
 def _wallet():
@@ -46,13 +87,27 @@ def _wallet():
     return w3, account, sign_and_send, TxRevertedError
 
 
-def _send_collect(user: str, amount_wei: int, treasury: str, token: str, wallet=None) -> str:
+def _send_collect(user: str, amount_wei: int, treasury: str, token: str, wallet=None, tx_hash: str = "") -> str:
     w3, account, sign_and_send, _ = wallet or _wallet()
-    c = w3.eth.contract(address=Web3.to_checksum_address(token), abi=_TRANSFER_FROM_ABI)
-    from config import RELAY_FEE_COLLECT_GAS
-    tx = c.functions.transferFrom(
-        Web3.to_checksum_address(user), Web3.to_checksum_address(treasury), int(amount_wei),
-    ).build_transaction({"from": account.address, "gas": int(RELAY_FEE_COLLECT_GAS)})
+    from config import RELAY_FEE_COLLECT_GAS, RELAY_FEE_COLLECT_GAS_CONTRACT, FEE_COLLECTOR_ADDRESS
+    tok = w3.eth.contract(address=Web3.to_checksum_address(token), abi=_TRANSFER_FROM_ABI)
+    u = Web3.to_checksum_address(user)
+    route = "legacy"
+    if FEE_COLLECTOR_ADDRESS:
+        fc_addr = Web3.to_checksum_address(FEE_COLLECTOR_ADDRESS)
+        a_new = tok.functions.allowance(u, fc_addr).call()
+        a_old = tok.functions.allowance(u, account.address).call()
+        route = collect_route(FEE_COLLECTOR_ADDRESS, a_new, a_old, int(amount_wei))
+    if route == "contract":
+        fc = w3.eth.contract(address=fc_addr, abi=_FEE_COLLECTOR_ABI)
+        tx = fc.functions.collect(u, int(amount_wei), _ref_bytes32(tx_hash)).build_transaction(
+            {"from": account.address, "gas": int(RELAY_FEE_COLLECT_GAS_CONTRACT)})
+        logger.info("fee collect via FeeCollector %s user=%s", fc_addr, user[:10])
+    else:
+        tx = tok.functions.transferFrom(u, Web3.to_checksum_address(treasury), int(amount_wei)).build_transaction(
+            {"from": account.address, "gas": int(RELAY_FEE_COLLECT_GAS)})
+        if FEE_COLLECTOR_ADDRESS:
+            logger.info("fee collect legacy transferFrom (allowance not yet on the FeeCollector) user=%s", user[:10])
     return sign_and_send(tx)
 
 
@@ -80,7 +135,8 @@ def collect_due_fees(db, *, send=None, limit: int = BATCH) -> dict:
                 fee_tx = send(row.user_address, amount_wei)
             else:
                 wallet = wallet or _wallet()
-                fee_tx = _send_collect(row.user_address, amount_wei, TREASURY_ADDRESS, VSP_TOKEN_ADDRESS, wallet)
+                fee_tx = _send_collect(row.user_address, amount_wei, TREASURY_ADDRESS, VSP_TOKEN_ADDRESS, wallet,
+                                       tx_hash=getattr(row, "tx_hash", "") or "")
             mark_fee_collected(db, row.id, fee_tx, float(row.fee_charge_vsp))
             db.commit()
             out["collected"] += 1
