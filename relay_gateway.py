@@ -221,7 +221,11 @@ def _relay_config() -> Dict[str, Any]:
 
 
 def _fee_collector() -> str:
-    """patch_relay_gas_fee_2: the relay wallet collects the fee (relay.py's permitted spender)."""
+    """patch_relay_gas_fee_2: the fee spender clients permit. patch_fee_collector: the FeeCollector
+    contract when deployed (FEE_COLLECTOR_ADDRESS), else the relay wallet (legacy)."""
+    from config import FEE_COLLECTOR_ADDRESS
+    if FEE_COLLECTOR_ADDRESS:
+        return FEE_COLLECTOR_ADDRESS.lower()
     try:
         from relay_wallet import account as _relay_account
         return (_relay_account.address or "").lower()
