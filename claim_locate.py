@@ -19,6 +19,15 @@ Three stages, cheapest first:
      then a pgvector search scoped to the candidate claims. Catches paraphrases,
      where there is semantic but not lexical overlap.
 
+A sentence can state several claims ("Climate change threatens people with
+increased flooding, extreme heat, …" states a flooding claim and a heat claim),
+so each stage keeps every claim that clears its threshold for a sentence — up to
+MAX_PER_SENTENCE, best first — and the sentence id appears in each of those
+claims' groups. The extension ranks them, underlines the top one and offers the
+rest. A generic claim whose words are all contained in a more specific matching
+claim is dropped, so "climate change threatens people" never rides along with
+the claims that actually say what the threat is.
+
 No LLM is involved. Ported from the retired verity-api gateway's /article/match,
 which ran the same algorithm over an ingestor-maintained copy of this corpus.
 
@@ -67,6 +76,8 @@ LEX_CONTAINMENT = _env_float("VSP_LOCATE_CONTAINMENT", 0.85)
 LEX_MIN_CLAIM_TOKENS = _env_int("VSP_LOCATE_MIN_CLAIM_TOKENS", 4)
 # Cosine similarity floor for the vector stage.
 VECTOR_THRESHOLD = _env_float("VSP_LOCATE_VECTOR_THRESHOLD", 0.8)
+# How many claims one sentence may resolve to (best first).
+MAX_PER_SENTENCE = _env_int("VSP_LOCATE_MAX_PER_SENTENCE", 4)
 # Bounds on the work one request can ask for.
 CANDIDATE_LIMIT = _env_int("VSP_LOCATE_CANDIDATE_LIMIT", 300)
 MAX_SENTENCES = _env_int("VSP_LOCATE_MAX_SENTENCES", 400)
@@ -134,31 +145,45 @@ def _candidate_claims(db: Session, phrases: List[str]) -> List[Tuple[int, str]]:
 
 # ── Stage 2: lexical containment ───────────────────────────────────
 
+Matches = Dict[int, List[Tuple[int, float]]]  # sentence index -> [(post_id, score)] best first
+
+
+def _drop_subsumed(hits: List[Tuple[int, float, Set[str]]]) -> List[Tuple[int, float, Set[str]]]:
+    """Drop a matching claim whose tokens are a strict subset of another matching
+    claim's: the generic claim ("climate change threatens people") is implied by
+    the specific one ("… with extreme heat") and would otherwise ride along with
+    every specific claim in the sentence."""
+    keep = []
+    for post_id, score, toks in hits:
+        if any(o_toks > toks for o_id, _, o_toks in hits if o_id != post_id):
+            continue
+        keep.append((post_id, score, toks))
+    return keep
+
+
 def _lexical_matches(
     sentence_tokens: List[Set[str]],
     candidates: List[Tuple[int, List[str]]],
-) -> Dict[int, Tuple[int, float]]:
-    """Best candidate per sentence index by claim-token containment."""
-    out: Dict[int, Tuple[int, float]] = {}
+    limit: int = MAX_PER_SENTENCE,
+) -> Matches:
+    """Candidates per sentence index by claim-token containment, best first."""
+    out: Matches = {}
     for i, sent in enumerate(sentence_tokens):
-        best_post: Optional[int] = None
-        best_score = 0.0
-        best_len = 0
+        hits: List[Tuple[int, float, Set[str]]] = []
         for post_id, toks in candidates:
             if len(toks) < LEX_MIN_CLAIM_TOKENS:
                 continue
-            hits = sum(1 for t in toks if t in sent)
-            score = hits / len(toks)
-            if score < LEX_CONTAINMENT:
-                continue
-            # Highest containment wins, ties broken toward the longer (more
-            # specific) claim so a generic claim can't shadow the precise one.
-            if best_post is None or score > best_score or (
-                score == best_score and len(toks) > best_len
-            ):
-                best_post, best_score, best_len = post_id, score, len(toks)
-        if best_post is not None:
-            out[i] = (best_post, best_score)
+            n = sum(1 for t in toks if t in sent)
+            score = n / len(toks)
+            if score >= LEX_CONTAINMENT:
+                hits.append((post_id, score, set(toks)))
+        if not hits:
+            continue
+        hits = _drop_subsumed(hits)
+        # Highest containment first, ties broken toward the longer (more
+        # specific) claim; the candidate order (full-text rank) settles the rest.
+        hits.sort(key=lambda h: (-h[1], -len(h[2])))
+        out[i] = [(post_id, score) for post_id, score, _ in hits[:limit]]
     return out
 
 
@@ -168,8 +193,9 @@ def _vector_matches(
     db: Session,
     texts: List[str],
     candidate_ids: List[int],
-) -> Dict[int, Tuple[int, float]]:
-    """Nearest candidate claim per sentence within the similarity threshold."""
+    limit: int = MAX_PER_SENTENCE,
+) -> Matches:
+    """Nearest candidate claims per sentence within the similarity threshold, best first."""
     from config import EMBEDDINGS_PROVIDER
     if EMBEDDINGS_PROVIDER == "stub" or not texts or not candidate_ids:
         return {}
@@ -209,19 +235,40 @@ def _vector_matches(
                      AND post_id = ANY(:ids)
                      AND (embedding <=> q.vec::vector) <= :maxdist
                    ORDER BY embedding <=> q.vec::vector
-                   LIMIT 1
+                   LIMIT :k
               ) m
+             ORDER BY q.idx, m.sim DESC
         """), {
             "idxs": idxs,
             "vecs": lits,
             "ids": candidate_ids,
             "maxdist": 1.0 - VECTOR_THRESHOLD,
+            "k": max(1, limit),
         }).fetchall()
     except Exception as e:
         logger.warning("locate: vector search failed, lexical only: %s", e)
         return {}
 
-    return {int(r[0]): (int(r[1]), float(r[2])) for r in rows}
+    out: Matches = {}
+    for r in rows:
+        out.setdefault(int(r[0]), []).append((int(r[1]), float(r[2])))
+    return out
+
+
+def _merge_matches(lexical: Matches, vector: Matches, limit: int = MAX_PER_SENTENCE) -> Matches:
+    """Per sentence, the union of both stages' claims, each at its more confident
+    score (a near-1.0 containment beats a borderline vector score and vice
+    versa), best first, capped."""
+    out: Matches = {}
+    for i in set(lexical) | set(vector):
+        best: Dict[int, float] = {}
+        for post_id, score in lexical.get(i, []) + vector.get(i, []):
+            if score > best.get(post_id, -1.0):
+                best[post_id] = score
+        ranked = sorted(best.items(), key=lambda kv: -kv[1])[:limit]
+        if ranked:
+            out[i] = ranked
+    return out
 
 
 # ── Claim summaries ────────────────────────────────────────────────
@@ -296,22 +343,16 @@ def locate_claims(
     lexical = _lexical_matches(kept_tokens, cand_tokens)
     vector = _vector_matches(db, [t for _, t in kept], [pid for pid, _ in candidates])
 
-    # Per sentence take the more confident of the two: a near-1.0 containment
-    # should beat a borderline vector score, and vice versa.
-    matched: Dict[int, Tuple[int, float]] = {}
-    for i in range(len(kept)):
-        choice = vector.get(i)
-        lex = lexical.get(i)
-        if lex and (choice is None or lex[1] > choice[1]):
-            choice = lex
-        if choice:
-            matched[i] = choice
+    # Every claim a sentence states, each at its more confident score; a
+    # sentence stating several claims lands in each of their groups.
+    matched = _merge_matches(lexical, vector)
 
     grouped: Dict[int, Dict[str, Any]] = {}
-    for i, (post_id, sim) in matched.items():
-        g = grouped.setdefault(post_id, {"sentence_ids": [], "sim": 0.0})
-        g["sentence_ids"].append(kept[i][0])
-        g["sim"] = max(g["sim"], sim)
+    for i in sorted(matched):
+        for post_id, sim in matched[i]:
+            g = grouped.setdefault(post_id, {"sentence_ids": [], "sim": 0.0})
+            g["sentence_ids"].append(kept[i][0])
+            g["sim"] = max(g["sim"], sim)
 
     cand_text = dict(candidates)
     groups: List[Dict[str, Any]] = []
