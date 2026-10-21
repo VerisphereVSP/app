@@ -800,7 +800,13 @@ def _relay_async_sync(body: RelayRequest, db: Session):
                     f'Insufficient VSP allowance for the Forwarder fee: need {onchain_fee_wei / 1e18:.4f} VSP, '
                     f'allowance {fwd_allowance / 1e18:.4f}. Sign a fee permit.')
         if fee_charge_wei > 0:
-            coll_allowance = vsp_c.functions.allowance(user_addr, _relay_account.address).call()
+            # patch_fee_collector_2: check the allowance that will actually pay — the advertised collector (the
+            # FeeCollector contract), falling back to the relay wallet for a not-yet-re-permitted user. The old line
+            # read the relay wallet only, so a wallet that had permitted only the contract was refused (prod 10-20/21).
+            from fee_collector import fee_allowance_wei
+            coll_allowance = fee_allowance_wei(
+                lambda u, s: vsp_c.functions.allowance(Web3.to_checksum_address(u), Web3.to_checksum_address(s)).call(),
+                user_addr, _collector_address(), _relay_account.address, fee_charge_wei)
             if coll_allowance < fee_charge_wei:
                 raise HTTPException(400,
                     f'Insufficient VSP allowance for relay fee: need {fee_charge_vsp:.4f} VSP, '

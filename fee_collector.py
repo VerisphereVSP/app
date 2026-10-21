@@ -70,6 +70,17 @@ def collect_route(fee_collector: str, allowance_contract: int, allowance_legacy:
     return "contract"
 
 
+def fee_allowance_wei(allowance_of, user: str, collector: str, legacy: str, needed_wei: int) -> int:
+    """patch_fee_collector_2: the allowance that will pay this fee — the user's allowance to the advertised
+    collector (the FeeCollector contract once deployed), or, during the transition, to the relay wallet for
+    a user who has not re-permitted yet. Mirrors collect_route: the pre-flight check and the collector agree.
+    `allowance_of(user, spender) -> int` is injected (the relay passes the token contract's call)."""
+    have = int(allowance_of(user, collector))
+    if have < needed_wei and legacy and legacy.lower() != (collector or "").lower():
+        have = max(have, int(allowance_of(user, legacy)))
+    return have
+
+
 def _ref_bytes32(tx_hash: str) -> bytes:
     """The relayed action's tx hash as the FeeCollected ref (zero-padded if shorter)."""
     h = (tx_hash or "").lower().removeprefix("0x")

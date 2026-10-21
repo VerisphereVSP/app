@@ -166,3 +166,34 @@ class TestAdvertised:
         assert ns["_collector_address"]() == FC
         monkeypatch.setattr(cfg, "FEE_COLLECTOR_ADDRESS", "")
         assert ns["_collector_address"]() == RELAY
+
+
+class TestPreflightAllowance:
+    """patch_fee_collector_2: the relay's pre-flight check must read the allowance that will pay the fee."""
+
+    def _alw(self, table):
+        return lambda u, s: table.get((u.lower(), s.lower()), 0)
+
+    def test_contract_allowance_covers(self):
+        a = self._alw({(USER, FC): 100 * ONE})
+        assert fcmod.fee_allowance_wei(a, USER, FC, RELAY, ONE // 10) == 100 * ONE
+
+    def test_legacy_allowance_covers_a_not_yet_repermitted_user(self):
+        a = self._alw({(USER, RELAY): 100 * ONE})
+        assert fcmod.fee_allowance_wei(a, USER, FC, RELAY, ONE // 10) == 100 * ONE
+
+    def test_neither_covers(self):
+        a = self._alw({(USER, FC): ONE // 100, (USER, RELAY): ONE // 50})
+        assert fcmod.fee_allowance_wei(a, USER, FC, RELAY, ONE // 10) == ONE // 50  # the larger, still short
+
+    def test_legacy_mode_reads_the_relay_once(self):
+        calls = []
+        def a(u, s):
+            calls.append(s); return 5 * ONE
+        assert fcmod.fee_allowance_wei(a, USER, RELAY, RELAY, ONE) == 5 * ONE
+        assert calls == [RELAY]
+
+    def test_relay_source_uses_the_helper_not_the_relay_wallet_alone(self):
+        src = (ROOT / "relay.py").read_text()
+        assert "fee_allowance_wei(" in src
+        assert "vsp_c.functions.allowance(user_addr, _relay_account.address).call()" not in src
