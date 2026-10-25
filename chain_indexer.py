@@ -560,6 +560,30 @@ def _embed_claim_text(db: Session, post_id: int, claim_text: str) -> None:
         logger.debug("Could not store embedding for claim %d: %s", post_id, e)
 
 
+def _known_stakers(db: Session, post_id: int) -> list[str]:
+    """Addresses with an indexed lot on the post (chain_user_stake), lowercase."""
+    rows = db.execute(sql_text(
+        "SELECT DISTINCT user_address FROM chain_user_stake WHERE post_id = :pid"
+    ), {"pid": post_id}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _users_to_reindex(db: Session, post_id: int, meta: dict) -> list[str] | None:
+    """patch_settle_reindex_stakers: which users' lots to re-read for an affected post.
+
+    Event users (StakeAdded / StakeWithdrawn / PostCreated) always. When the post SETTLED
+    (PostUpdated) every lot on it changed — the daily mint/burn is applied to the stored amounts,
+    and getUserLotInfo projects from the new snapshot — so the stakers already indexed for the
+    post are re-read as well. Before this, a settlement refreshed the post totals only, and a
+    user's position (and the portfolio's Total Staked) stayed at the value of their last own
+    transaction. Returns None when there is nobody to re-index (the canonical writer's "no users").
+    """
+    users = {u.lower() for u in meta.get("users", set())}
+    if meta.get("settled"):
+        users.update(a.lower() for a in _known_stakers(db, post_id))
+    return sorted(users) or None
+
+
 def index_post_canonical(
     db: Session,
     post_id: int,
@@ -893,7 +917,8 @@ def poll_events_atomic(db: Session) -> dict:
             staker = evt.args.staker.lower()
             affected_posts.setdefault(pid, {"users": set()})["users"].add(staker)
         elif name == "PostUpdated":
-            affected_posts.setdefault(evt.args.postId, {"users": set()})
+            # patch_settle_reindex_stakers: a settlement changed every lot on the post — refresh the known stakers too
+            affected_posts.setdefault(evt.args.postId, {"users": set()})["settled"] = True
         elif name == "PostCreated":
             pid = evt.args.postId
             creator = evt.args.creator.lower()
@@ -923,7 +948,7 @@ def poll_events_atomic(db: Session) -> dict:
         # Index each affected post's canonical state. Enqueue derived
         # state for claim posts.
         for pid, meta in affected_posts.items():
-            users = list(meta["users"]) or None
+            users = _users_to_reindex(db, pid, meta)  # patch_settle_reindex_stakers
             result = index_post_canonical(db, pid, user_addresses=users)
             if result["content_type"] == 0:
                 enqueue_derived_state(db, pid, is_new=result["is_new"])
@@ -1415,7 +1440,8 @@ def _backfill_block_range(from_block: int, to_block: int) -> None:
             staker = evt.args.staker.lower()
             affected_posts.setdefault(pid, {"users": set()})["users"].add(staker)
         elif name == "PostUpdated":
-            affected_posts.setdefault(evt.args.postId, {"users": set()})
+            # patch_settle_reindex_stakers: a settlement changed every lot on the post — refresh the known stakers too
+            affected_posts.setdefault(evt.args.postId, {"users": set()})["settled"] = True
         elif name == "PostCreated":
             pid = evt.args.postId
             creator = evt.args.creator.lower()
@@ -1437,7 +1463,7 @@ def _backfill_block_range(from_block: int, to_block: int) -> None:
             for cpid in _list_connected_posts(db, fpid) | _list_connected_posts(db, tpid):
                 affected_posts.setdefault(cpid, {"users": set()})
         for pid, meta in affected_posts.items():
-            users = list(meta["users"]) or None
+            users = _users_to_reindex(db, pid, meta)  # patch_settle_reindex_stakers
             result = index_post_canonical(db, pid, user_addresses=users)
             if result["content_type"] == 0:
                 enqueue_derived_state(db, pid, is_new=result["is_new"])
