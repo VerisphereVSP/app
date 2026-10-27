@@ -17,3 +17,4 @@ google-cloud-kms>=3.16.0,<4
 eth-account>=0.14.0,<1
 ecdsa>=0.19.2,<1
 rlp>=5.0.0,<6
+pillow>=11.0,<13  # patch_verisnap_share: server-rendered claim cards
