@@ -111,6 +111,22 @@ def _deliver_email(kind: str, text: str) -> None:
         logger.warning("notify: email delivery to %s failed: %s", recipients, e)
 
 
+def _network() -> str:
+    """The running network's name ("mainnet", "fuji", "chain-<id>"), from config; "unknown" if config is unavailable."""
+    try:
+        from config import NETWORK
+        return str(NETWORK)
+    except Exception:
+        return "unknown"
+
+
+def _allowed_networks() -> set:
+    """ALERT_NETWORKS: comma-separated names allowed to deliver; default mainnet only. "*" allows every network."""
+    raw = os.getenv("ALERT_NETWORKS", "mainnet")
+    names = {x.strip() for x in raw.split(",") if x.strip()}
+    return {"*"} | names if "*" in names else names
+
+
 def send_alert(kind: str, message: str, **fields) -> None:
     """Fan out one alert to all configured channels. NEVER raises."""
     try:
@@ -124,6 +140,16 @@ def send_alert(kind: str, message: str, **fields) -> None:
                 return
             _last_sent[kind] = now
 
+        # patch_alert_network_guard: every alert names its network, and only the networks in
+        # ALERT_NETWORKS (default "mainnet") leave the host — a dev/Fuji worker with a token configured
+        # by mistake logs the alert instead of posting it to the ops channel (2026-10-27: dev's keeper alerts
+        # reached Telegram through secrets shared by both networks).
+        network = _network()
+        message = f"[{network}] {message}"
+        allowed = _allowed_networks()
+        if "*" not in allowed and network not in allowed:
+            logger.warning("notify: alert suppressed off-network (%s not in ALERT_NETWORKS): %s %s", network, kind, message)
+            return
         text = _format_text(kind, message, fields)
         payload = {
             "kind": kind,
