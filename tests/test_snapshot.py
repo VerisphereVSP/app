@@ -116,6 +116,20 @@ class TestCard:
         r2 = client.get("/api/claims/142/card.png")
         assert r2.content == r.content and calls == []  # served from the 60 s cache
 
+    def test_fit_keeps_44px_for_short_and_shrinks_long_without_cutting(self):
+        from PIL import Image, ImageDraw
+        d = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+        avail = (630 - 92) - 24 - 84 - 36 - 140
+        short = "\u201cRegular coffee consumption is associated with a lower risk of stroke.\u201d"
+        f, lines, _ = snapshot.fit_claim(d, short, 1088, avail)
+        assert f.size == 44 and len(lines) == 2
+        long = "\u201c" + "The modern-day rise in global temperatures is driven by human activities, especially fossil fuel burning since the Industrial Revolution, which has increased greenhouse gases in the atmosphere. " * 2 + "\u201d"
+        f, lines, _ = snapshot.fit_claim(d, long, 1088, avail)
+        assert f.size < 44 and not lines[-1].endswith("\u2026") and lines[-1].endswith("\u201d")
+        huge = "\u201c" + "word " * 400 + "\u201d"
+        f, lines, _ = snapshot.fit_claim(d, huge, 1088, avail)
+        assert f.size == 26 and lines[-1].endswith("\u2026")
+
     def test_long_text_is_wrapped_and_truncated(self):
         snap = snapshot.build_snapshot(None, 142, "https://x")
         snap["text"] = "word " * 120
@@ -133,6 +147,7 @@ class TestSharePage:
         assert 'og:title" content="Regular coffee consumption' in h
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
         assert "<script" not in h  # the edge CSP allows no inline script; the page needs none
+        assert client.head("/c/142").status_code == 200 and client.head("/api/claims/142/card.png").status_code == 200
 
     def test_share_page_escapes_text(self, client):
         TEXTS[142] = 'Says <b>"hi"</b> & bye'

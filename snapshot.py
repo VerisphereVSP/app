@@ -169,6 +169,21 @@ def _wrap(draw, text: str, font, max_w: int, max_lines: int) -> list[str]:
     return lines
 
 
+FIT_SIZES = (44, 40, 36, 32, 28, 26)
+
+
+def fit_claim(draw, quote: str, max_w: int, avail_h: int):
+    """44 px when the whole quote fits; else the largest smaller size at which it does (an ellipsis only at 26 px).
+    Returns (font, lines, line_height)."""
+    for size in FIT_SIZES:
+        font = _font(size); lh = int(size * 1.22)
+        max_lines = max(1, avail_h // lh)
+        lines = _wrap(draw, quote, font, max_w, max_lines)
+        if not lines[-1].endswith("\u2026") or size == FIT_SIZES[-1]:
+            return font, lines, lh
+    return font, lines, lh  # pragma: no cover
+
+
 def render_card(snap: dict) -> bytes:
     """The 1200×630 Verisnap card as PNG bytes. Layout = the design mockup (Main.dc.html)."""
     from PIL import Image, ImageDraw
@@ -190,19 +205,17 @@ def render_card(snap: dict) -> bytes:
     right = f"Verisnap · claim #{snap['post_id']}"
     f18 = _font(18, bold=False)
     d.text((CARD_W - pad_x - d.textlength(right, font=f18), y + 18), right, font=f18, fill=SUBTLE)
-    # claim text, wrapped
-    f_claim = _font(44)
-    quote = f"“{snap['text']}”"
-    lines = _wrap(d, quote, f_claim, CARD_W - 2 * pad_x, 3)
-    if len(lines) == 3 and len(quote) > 150:
-        f_claim = _font(36)
-        lines = _wrap(d, quote, f_claim, CARD_W - 2 * pad_x, 3)
-    y = 140
-    lh = int(f_claim.size * 1.22)
+    # claim text: 44 px when it fits; otherwise the largest smaller size at which the WHOLE claim fits the space
+    # above the pill (the pill and band move down with the text; the footer stays). Ellipsis only past 26 px.
+    quote = f"\u201c{snap['text']}\u201d"
+    text_top = 140
+    avail_h = (CARD_H - 40 - 52) - 24 - 84 - 36 - text_top   # footer top − gap − pill − gap − text top
+    f_claim, lines, lh = fit_claim(d, quote, CARD_W - 2 * pad_x, avail_h)
+    y = text_top
     for ln in lines:
         d.text((pad_x, y), ln, font=f_claim, fill=INK)
         y += lh
-    # pill + band
+    # pill + band — directly under the text (never above where a 3-line claim would put it)
     y = max(y + 36, 330)
     vs = float(snap["verity_score"])
     pw, ph = 260, 84
@@ -267,14 +280,14 @@ def claim_snapshot(post_id: int, request: Request, db: Session = Depends(get_db)
     return build_snapshot(db, post_id, _public_base(request))
 
 
-@router.get("/api/claims/{post_id}/card.png")
+@router.api_route("/api/claims/{post_id}/card.png", methods=["GET", "HEAD"])
 def claim_card(post_id: int, request: Request, db: Session = Depends(get_db)):
     png = _cached_card(db, post_id, _public_base(request))
     return Response(content=png, media_type="image/png",
                     headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
 
 
-@router.get("/c/{post_id}", response_class=HTMLResponse)
+@router.api_route("/c/{post_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     """What a pasted link unfurls into. No scripts (the edge CSP allows none inline); a plain link into the app."""
     snap = build_snapshot(db, post_id, _public_base(request))
