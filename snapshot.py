@@ -1,5 +1,6 @@
 """app/snapshot.py — patch_verisnap_share
-Verisnap: a claim's shareable snapshot.
+Verisphere Snapshot: a claim's shareable snapshot. (patch_snapshot_naming: the working name "Verisnap" was retired —
+an existing product of that name verifies snapshots; user-facing wording is "Verisphere Snapshot" / "Snapshot".)
 
   GET /api/claims/{post_id}/snapshot   JSON — text, Verity Score, band, stake split, settlement times, urls
   GET /api/claims/{post_id}/card.png   PNG 1200×630 (Open Graph size), rendered server-side, cached 60 s
@@ -185,13 +186,13 @@ def fit_claim(draw, quote: str, max_w: int, avail_h: int):
 
 
 def render_card(snap: dict) -> bytes:
-    """The 1200×630 Verisnap card as PNG bytes. Layout = the design mockup (Main.dc.html)."""
+    """The 1200×630 Snapshot card as PNG bytes. Layout = the design mockup (Main.dc.html)."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (CARD_W, CARD_H), (255, 255, 255))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle([0, 0, CARD_W - 1, CARD_H - 1], radius=24, outline=CARD_BORDER, width=2)
     pad_x = 56
-    # header: logo + Verisphere; Verisnap · claim #N at right
+    # header: logo + Verisphere; Snapshot · claim #N at right
     y = 40
     x = pad_x
     if _LOGO.exists():
@@ -202,7 +203,7 @@ def render_card(snap: dict) -> bytes:
         except Exception:
             pass
     d.text((x, y + 4), "Verisphere", font=_font(36), fill=INK)
-    right = f"Verisnap · claim #{snap['post_id']}"
+    right = f"Snapshot · claim #{snap['post_id']}"
     f18 = _font(18, bold=False)
     d.text((CARD_W - pad_x - d.textlength(right, font=f18), y + 18), right, font=f18, fill=SUBTLE)
     # claim text: 44 px when it fits; otherwise the largest smaller size at which the WHOLE claim fits the space
@@ -310,7 +311,7 @@ main{{max-width:760px;margin:0 auto;padding:24px 16px 48px}}img{{width:100%;heig
 a.btn{{display:inline-block;margin-top:20px;padding:14px 22px;border-radius:999px;background:#5B4BC4;color:#fff;text-decoration:none;font-weight:600;font-size:16px}}
 p{{color:#5D5776;font-size:15px;line-height:1.5}}</style></head>
 <body><main>
-<img src="{card}" alt="Verisnap of claim #{post_id}: {title}">
+<img src="{card}" alt="Verisphere Snapshot of claim #{post_id}: {title}">
 <a class="btn" href="{app_url}">Open claim #{post_id} on Verisphere</a>
 <p>Verisphere is a truth-staking protocol: people stake VSP to support or challenge factual claims, and every claim settles once a day. The score above is the stake behind each side right now, not a verdict; it changes as people stake.</p>
 </main></body></html>"""
