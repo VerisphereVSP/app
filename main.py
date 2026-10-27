@@ -45,6 +45,7 @@ from claim_locate import router as claim_locate_router
 from claim_atomicity import router as claim_atomicity_router
 from relay_gateway import router as relay_gateway_router
 from pool_trade import router as pool_trade_router  # patch_pool_trade: buy/sell VSP with AVAX or USDC
+from snapshot import router as snapshot_router  # patch_verisnap_share: claim snapshot JSON, card PNG, /c/<id> share page
 from rate_limit import RateLimitMiddleware, cleanup_rate_limiter, _client_ip as _rl_client_ip, TRUSTED_PROXY_HOPS as _TRUSTED_PROXY_HOPS
 
 
@@ -195,6 +196,7 @@ app.include_router(claim_locate_router)
 app.include_router(claim_atomicity_router)
 app.include_router(relay_gateway_router)
 app.include_router(pool_trade_router)  # patch_pool_trade
+app.include_router(snapshot_router)  # patch_verisnap_share
 
 ADDRESSES_PATH = Path(f"/app/broadcast/Deploy.s.sol/{CHAIN_ID}/addresses.json")
 

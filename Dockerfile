@@ -9,7 +9,9 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# fonts-dejavu-core: patch_verisnap_share — the claim card renderer uses DejaVu Sans (falls back to Pillow's default font)
 
 # Copy core artifacts (for ABI loading — includes VeriSphereForwarder)
 COPY core/out /core/out
