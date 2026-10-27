@@ -1,6 +1,6 @@
 # app/tests/test_snapshot.py — patch_verisnap_share
 """
-Verisnap: the snapshot JSON, the PNG card and the /c/<id> share page. Pure unit: the indexed reads are stubbed,
+Verisphere Snapshot: the snapshot JSON, the PNG card and the /c/<id> share page. Pure unit: the indexed reads are stubbed,
 the router is mounted on a bare FastAPI app with the DB dependency overridden; no chain, no Postgres.
 """
 import sys
@@ -147,6 +147,7 @@ class TestSharePage:
         assert 'og:title" content="Regular coffee consumption' in h
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
         assert "<script" not in h  # the edge CSP allows no inline script; the page needs none
+        assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
         assert client.head("/c/142").status_code == 200 and client.head("/api/claims/142/card.png").status_code == 200
 
     def test_share_page_escapes_text(self, client):
