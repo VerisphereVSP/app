@@ -80,19 +80,33 @@ class TestSnapshotJson:
         assert d["share_url"] == "https://app.verisphere.co/c/142"
         assert d["card_url"] == "https://app.verisphere.co/api/claims/142/card.png"
         assert d["app_url"] == "https://app.verisphere.co/claims?post=142"
-        assert d["share_text"].startswith("“Regular coffee") and "Mostly supported, VS +44 (72 % of stake backs it)" in d["share_text"]
+        # patch_snapshot_invite: the text form leads with the invitation question, quotes the claim, states the
+        # standing, and ends with the call + link
+        assert d["share_text"] == ("Think it's wrong? “Regular coffee consumption is associated with a lower risk of stroke.” — "
+                                   "72 % of stake on Verisphere backs it (Mostly supported, VS +44). Challenge it: https://app.verisphere.co/c/142")
+        assert d["invite_question"] == "Think it's wrong?" and d["invite_call"] == "Challenge it"
+        assert d["invite_line"] == "Think it's wrong? Challenge it at app.verisphere.co/c/142"
         assert d["next_settlement_at"].endswith("T00:00:00Z")
 
     def test_challenged_claim_reads_from_the_challenge_side(self, client):
         d = client.get("/api/claims/17/snapshot").json()
         assert d["band"] == "Strongly challenged" and d["stake_line"] == "80 % of stake challenges this claim"
+        assert d["invite_question"] == "Think it's right?" and d["invite_call"] == "Support it"
+        assert "80 % of stake on Verisphere challenges it (Strongly challenged, VS -73). Support it: " in d["share_text"]
 
     def test_no_stake_and_no_verdict_words(self, client):
         d = client.get("/api/claims/5/snapshot").json()
         assert d["stake_line"] == "No stake yet" and d["band"] == "Contested"
-        words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text")).lower()
-        for banned in ("true", "false", "price", "value", "invest"):
-            assert banned not in words
+        assert d["invite_question"] == "Nobody has taken a side yet." and d["invite_call"] == "Be the first"
+        assert "no stake on Verisphere so far (Contested, VS +0). Be the first: " in d["share_text"]
+        for pid in (5, 17, 142):
+            d = client.get(f"/api/claims/{pid}/snapshot").json()
+            words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text", "invite_line")).lower()
+            for banned in ("true", "false", "price", "value", "invest"):
+                assert banned not in words, (pid, banned)
+
+    def test_contested_with_stake_asks_which_side(self):
+        assert snapshot.invite_for("neutral", 55) == ("Which side are you on?", "Take a side")
 
     def test_links_and_unknown_are_404(self, client):
         assert client.get("/api/claims/9/snapshot").status_code == 404
@@ -130,6 +144,20 @@ class TestCard:
         f, lines, _ = snapshot.fit_claim(d, huge, 1088, avail)
         assert f.size == 26 and lines[-1].endswith("\u2026")
 
+    def test_footer_invitation_is_drawn_per_standing(self):
+        """patch_snapshot_invite: the footer band differs between a supported and a challenged claim (different
+        invitation) and carries violet (the call + url) in every case."""
+        from PIL import Image
+        import io
+        def footer(pid):
+            png = snapshot.render_card(snapshot.build_snapshot(None, pid, "https://app.verisphere.co"))
+            im = Image.open(io.BytesIO(png)).convert("RGB")
+            return im.crop((56, 630 - 40 - 28, 700, 630 - 40))
+        a, b, c = footer(142), footer(17), footer(5)
+        assert a.tobytes() != b.tobytes() and b.tobytes() != c.tobytes()
+        for im in (a, b, c):
+            assert any(col == (0x37, 0x29, 0x9B) for _, col in im.getcolors(1 << 20)), "no violet call/url in the footer"
+
     def test_long_text_is_wrapped_and_truncated(self):
         snap = snapshot.build_snapshot(None, 142, "https://x")
         snap["text"] = "word " * 120
@@ -148,6 +176,8 @@ class TestSharePage:
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
         assert "<script" not in h  # the edge CSP allows no inline script; the page needs none
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
+        assert "<h2>Think it&#x27;s wrong?</h2>" in h and ">Challenge it on Verisphere</a>" in h  # patch_snapshot_invite
+        assert ">Support it on Verisphere</a>" in client.get("/c/17").text
         assert client.head("/c/142").status_code == 200 and client.head("/api/claims/142/card.png").status_code == 200
 
     def test_share_page_escapes_text(self, client):
