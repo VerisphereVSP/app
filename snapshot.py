@@ -77,6 +77,20 @@ def next_settlement(now: datetime | None = None) -> datetime:
     return nxt
 
 
+def invite_for(role: str, pct: int | None) -> tuple[str, str]:
+    """patch_snapshot_invite — the card's last line and the text form's lead, as a (question, call) pair.
+    The question invites the reader to take the other side of the current standing; it is about the game's
+    standing, never a verdict (no 'true'/'false'), and it is the same text on the card, in the share text and
+    on the share page so a pasted snapshot reads the same everywhere."""
+    if pct is None:
+        return "Nobody has taken a side yet.", "Be the first"
+    if role == "support":
+        return "Think it's wrong?", "Challenge it"
+    if role == "challenge":
+        return "Think it's right?", "Support it"
+    return "Which side are you on?", "Take a side"
+
+
 def _public_base(request: Request) -> str:
     """The public origin for absolute urls: PUBLIC_APP_URL if set, else the forwarded host behind the edge."""
     base = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
@@ -107,6 +121,15 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
     stake_line = (f"{pct} % of stake backs this claim" if pct is not None and vs >= 0
                   else f"{100 - pct} % of stake challenges this claim" if pct is not None
                   else "No stake yet")
+    # patch_snapshot_invite — the invitation (card's last line, share text's lead, share page heading)
+    question, call = invite_for(role, pct)
+    share_url = f"{base}/c/{post_id}"
+    invite_line = f"{question} {call} at {share_url.replace('https://', '').replace('http://', '')}"
+    standing = (f"{pct} % of stake on Verisphere backs it" if pct is not None and role == "support"
+                else f"{100 - pct} % of stake on Verisphere challenges it" if pct is not None and role == "challenge"
+                else f"stake on Verisphere is split {pct} / {100 - pct}" if pct is not None
+                else "no stake on Verisphere so far")
+    share_text = f"{question} “{text}” — {standing} ({band}, VS {vs:+.0f}). {call}: {share_url}"
     return {
         "post_id": post_id,
         "text": text,
@@ -121,12 +144,13 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
         "is_active": bool(info.get("is_active", True)),
         "snapshot_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "next_settlement_at": next_settlement(now).isoformat().replace("+00:00", "Z"),
-        "share_url": f"{base}/c/{post_id}",
+        "share_url": share_url,
         "card_url": f"{base}/api/claims/{post_id}/card.png",
         "app_url": f"{base}/claims?post={post_id}",
-        "share_text": (f"“{text}” — Verisphere: {band}, VS {vs:+.0f}"
-                       + (f" ({stake_line.replace('this claim', 'it')})" if pct is not None else "")
-                       + f". Details and evidence: {base}/c/{post_id}"),
+        "invite_question": question,
+        "invite_call": call,
+        "invite_line": invite_line,
+        "share_text": share_text,
     }
 
 
@@ -210,7 +234,7 @@ def render_card(snap: dict) -> bytes:
     # above the pill (the pill and band move down with the text; the footer stays). Ellipsis only past 26 px.
     quote = f"\u201c{snap['text']}\u201d"
     text_top = 140
-    avail_h = (CARD_H - 40 - 52) - 24 - 84 - 36 - text_top   # footer top − gap − pill − gap − text top
+    avail_h = (CARD_H - 40 - 58) - 24 - 84 - 36 - text_top   # footer top − gap − pill − gap − text top
     f_claim, lines, lh = fit_claim(d, quote, CARD_W - 2 * pad_x, avail_h)
     y = text_top
     for ln in lines:
@@ -244,16 +268,17 @@ def render_card(snap: dict) -> bytes:
     d.text((bx, py + 2), snap["band"], font=_font(34), fill=band_col)
     total = f"{snap['total_stake']:,.0f} VSP staked" if snap["total_stake"] >= 1 else f"{snap['total_stake']:.2f} VSP staked"
     d.text((bx, py + 50), f"{snap['stake_line']} · {total}", font=_font(22, bold=False), fill=MUTED)
-    # footer
+    # footer — patch_snapshot_invite: the last line is the invitation ("Think it's wrong? Challenge it at …/c/N"),
+    # question in ink, call + url in violet; the timestamp line stays above it (a snapshot is of a moving thing).
     f17 = _font(17, bold=False)
     snap_at = snap["snapshot_at"].replace("T", " ").replace("Z", " UTC")
-    foot1 = "Verity Score, settled daily from stake and linked evidence. It changes as people stake."
-    foot2 = f"Snapshot {snap_at} · next settlement 00:00 UTC"
-    d.text((pad_x, CARD_H - 40 - 52), foot1, font=f17, fill=SUBTLE)
-    d.text((pad_x, CARD_H - 40 - 26), foot2, font=f17, fill=SUBTLE)
-    url = snap["share_url"].replace("https://", "").replace("http://", "")
-    f20 = _font(20)
-    d.text((CARD_W - pad_x - d.textlength(url, font=f20), CARD_H - 40 - 30), url, font=f20, fill=VIOLET_DEEP)
+    foot = f"Verity Score: the stake behind each side right now, not a verdict · Snapshot {snap_at} · settles daily 00:00 UTC"
+    d.text((pad_x, CARD_H - 40 - 58), foot, font=f17, fill=SUBTLE)
+    f24 = _font(24)
+    q = snap["invite_question"] + " "
+    d.text((pad_x, CARD_H - 40 - 28), q, font=f24, fill=INK)
+    call = f"{snap['invite_call']} at {snap['share_url'].replace('https://', '').replace('http://', '')}"
+    d.text((pad_x + d.textlength(q, font=f24), CARD_H - 40 - 28), call, font=f24, fill=VIOLET_DEEP)
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
@@ -295,6 +320,7 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])
+    question = escape(snap["invite_question"]); call = escape(snap["invite_call"])  # patch_snapshot_invite
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claim #{post_id} · Verisphere</title>
@@ -309,10 +335,11 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
 <style>body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#F7F5FE;color:#1C1533}}
 main{{max-width:760px;margin:0 auto;padding:24px 16px 48px}}img{{width:100%;height:auto;border-radius:16px;border:1px solid #E4E1F2;background:#fff}}
 a.btn{{display:inline-block;margin-top:20px;padding:14px 22px;border-radius:999px;background:#5B4BC4;color:#fff;text-decoration:none;font-weight:600;font-size:16px}}
-p{{color:#5D5776;font-size:15px;line-height:1.5}}</style></head>
+p{{color:#5D5776;font-size:15px;line-height:1.5}}h2{{font-size:22px;margin:24px 0 0}}</style></head>
 <body><main>
 <img src="{card}" alt="Verisphere Snapshot of claim #{post_id}: {title}">
-<a class="btn" href="{app_url}">Open claim #{post_id} on Verisphere</a>
+<h2>{question}</h2>
+<a class="btn" href="{app_url}">{call} on Verisphere</a>
 <p>Verisphere is a truth-staking protocol: people stake VSP to support or challenge factual claims, and every claim settles once a day. The score above is the stake behind each side right now, not a verdict; it changes as people stake.</p>
 </main></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
