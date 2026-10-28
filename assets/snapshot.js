@@ -1,0 +1,72 @@
+/* patch_share_interactive — the share page's only script, served same-origin at /c/snapshot.js (CSP: script-src 'self').
+   Support / Challenge records an anonymous opinion (daily counts, nothing about the visitor), then the page explains the
+   game in three lines and offers one next step: Back it with VSP. The visitor's own pick is remembered in localStorage. */
+(function () {
+  "use strict";
+  var sec = document.getElementById("take-side");
+  if (!sec) return;
+  var pid = sec.getAttribute("data-post");
+  var pctAttr = sec.getAttribute("data-pct");           // % of stake supporting, or "" when nothing is staked
+  var pct = pctAttr === "" ? null : parseInt(pctAttr, 10);
+  var app = sec.getAttribute("data-app");
+  var key = "vsp_opinion_" + pid;
+  var buttons = sec.querySelectorAll("button[data-side]");
+  var verdict = document.getElementById("ts-verdict");
+  var readers = document.getElementById("ts-readers");
+  var how = document.getElementById("ts-how");
+  var back = document.getElementById("ts-back");
+  var ask = document.getElementById("ts-ask");
+
+  function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
+  function remember(side) { try { localStorage.setItem(key, side); } catch (e) { /* private mode */ } }
+
+  function line(side) {
+    if (pct === null) return "No one has staked on this claim yet — you would be the first to take a side with VSP.";
+    var mine = side === "support" ? pct : 100 - pct;
+    if (mine >= 50) return "You and " + mine + " % of the stake agree.";
+    return "You are with the " + mine + " % " + (side === "support" ? "backing it" : "challenging it") + "; " + (100 - mine) + " % of the stake is on the other side.";
+  }
+
+  function show(side, counts) {
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      b.disabled = true;
+      b.className = "side " + (b.getAttribute("data-side") === side ? "chosen" : "other");
+    }
+    if (ask) ask.textContent = side === "support" ? "You support this claim." : "You challenge this claim.";
+    verdict.textContent = line(side);
+    verdict.hidden = false;
+    if (counts && typeof counts.support_n === "number") {
+      var total = counts.support_n + counts.challenge_n;
+      readers.textContent = total === 1 ? "You are the first reader to take a side here."
+        : "Readers here: " + counts.support_n + " support · " + counts.challenge_n + " challenge.";
+      readers.hidden = false;
+    }
+    how.hidden = false;
+    back.href = app + "&side=" + side;
+    back.hidden = false;
+  }
+
+  function request(method, body) {
+    return fetch("/api/claims/" + pid + "/opinion", {
+      method: method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined,
+    }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+  }
+
+  for (var i = 0; i < buttons.length; i++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        var side = b.getAttribute("data-side");
+        remember(side);
+        show(side, null);
+        request("POST", { side: side }).then(function (counts) { if (counts) show(side, counts); });
+      });
+    })(buttons[i]);
+  }
+
+  var prev = remembered();
+  if (prev === "support" || prev === "challenge") {
+    show(prev, null);
+    request("GET").then(function (counts) { if (counts) show(prev, counts); });
+  }
+})();

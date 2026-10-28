@@ -174,10 +174,17 @@ class TestSharePage:
         assert '<meta name="twitter:card" content="summary_large_image">' in h
         assert 'og:title" content="Regular coffee consumption' in h
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
-        assert "<script" not in h  # the edge CSP allows no inline script; the page needs none
+        assert "<script>" not in h and "onclick=" not in h  # the edge CSP allows no inline script
+        assert '<script src="/c/snapshot.js" defer></script>' in h  # patch_share_interactive: the one same-origin script
+        assert '<section id="take-side" data-post="142" data-pct="72" data-app="https://app.verisphere.co/claims?post=142">' in h
+        assert 'data-side="support">Support</button>' in h and 'data-side="challenge">Challenge</button>' in h
+        assert 'id="ts-back" href="https://app.verisphere.co/claims?post=142" hidden>Back it with VSP</a>' in h
+        for line in snapshot.HOW_IT_WORKS:
+            assert line in h
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
-        assert "<h2>Think it&#x27;s wrong?</h2>" in h and ">Challenge it on Verisphere</a>" in h  # patch_snapshot_invite
+        assert "<noscript><h2>Think it&#x27;s wrong?</h2>" in h and ">Challenge it on Verisphere</a>" in h  # patch_snapshot_invite (no-JS path)
         assert ">Support it on Verisphere</a>" in client.get("/c/17").text
+        assert 'data-pct=""' in client.get("/c/5").text  # no stake → the script says so instead of a percentage
         assert client.head("/c/142").status_code == 200 and client.head("/api/claims/142/card.png").status_code == 200
 
     def test_share_page_escapes_text(self, client):
@@ -187,3 +194,68 @@ class TestSharePage:
             assert "<b>" not in h and "&lt;b&gt;" in h and "&amp;" in h
         finally:
             TEXTS[142] = "Regular coffee consumption is associated with a lower risk of stroke."
+
+
+# ── patch_share_interactive ────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def sqlite_client():
+    """The opinion routes against a real (sqlite) session: the migration's DDL and the upsert both run as written."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    eng = create_engine("sqlite://", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    ddl = (ROOT / "ops" / "compose" / "migrations" / "340_claim_opinion_daily.sql").read_text()
+    with eng.begin() as c:
+        c.execute(text("\n".join(l for l in ddl.splitlines() if not l.startswith("--"))))
+    SessionLocal = sessionmaker(bind=eng, future=True)
+    app = FastAPI()
+    app.include_router(snapshot.router)
+    def _db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    app.dependency_overrides[get_db] = _db
+    return TestClient(app)
+
+
+class TestOpinions:
+    def test_counts_start_empty_and_accumulate(self, sqlite_client):
+        c = sqlite_client
+        assert c.get("/api/claims/142/opinion").json() == {"post_id": 142, "support_n": 0, "challenge_n": 0, "total": 0, "support_pct": None}
+        assert c.post("/api/claims/142/opinion", json={"side": "support"}).json()["support_n"] == 1
+        c.post("/api/claims/142/opinion", json={"side": "support"})
+        d = c.post("/api/claims/142/opinion", json={"side": "challenge"}).json()
+        assert (d["support_n"], d["challenge_n"], d["total"], d["support_pct"]) == (2, 1, 3, 67)
+        assert c.get("/api/claims/17/opinion").json()["total"] == 0  # per claim
+
+    def test_only_counts_are_stored(self, sqlite_client):
+        """Anonymity rule: the table has exactly the count columns — nothing per visitor, no IP, no wallet, no time of day."""
+        raw = (ROOT / "ops" / "compose" / "migrations" / "340_claim_opinion_daily.sql").read_text().lower()
+        ddl = "\n".join(l for l in raw.splitlines() if not l.startswith("--"))
+        cols = [l.split()[0] for l in ddl.splitlines() if l.startswith("    ") and not l.strip().startswith("primary")]
+        assert cols == ["post_id", "day", "support_n", "challenge_n"]
+        for banned in ("ip", "wallet", "address", "user", "cookie", "timestamptz", "created_at"):
+            assert banned not in ddl, banned
+
+    def test_bad_side_and_unknown_claim(self, sqlite_client):
+        c = sqlite_client
+        assert c.post("/api/claims/142/opinion", json={"side": "maybe"}).status_code == 400
+        assert c.post("/api/claims/999/opinion", json={"side": "support"}).status_code == 404
+        assert c.post("/api/claims/9/opinion", json={"side": "support"}).status_code == 404  # a link, not a claim
+        assert c.get("/api/claims/999/opinion").status_code == 404
+
+    def test_script_is_served_same_origin(self, client):
+        r = client.get("/c/snapshot.js")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("application/javascript")
+        js = r.text
+        assert 'getElementById("take-side")' in js and '"/api/claims/" + pid + "/opinion"' in js and "localStorage" in js
+        assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
+
+    def test_explainer_wording(self):
+        words = " ".join(snapshot.HOW_IT_WORKS).lower()
+        for banned in ("true", "false", "price", "value", "invest", "profit", "return"):
+            assert banned not in words, banned
+        assert len(snapshot.HOW_IT_WORKS) == 3

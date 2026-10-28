@@ -25,6 +25,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from db import get_db
@@ -46,6 +48,15 @@ GRAY_FILL, PILL_BG, PILL_BORDER, CARD_BORDER = (0xD1, 0xD5, 0xDB), (0xF3, 0xF4, 
 
 _FONT_DIRS = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu", str(Path(__file__).resolve().parent / "assets" / "fonts")]
 _LOGO = Path(__file__).resolve().parent / "assets" / "vsp-128.png"
+_SCRIPT = Path(__file__).resolve().parent / "assets" / "snapshot.js"  # patch_share_interactive
+
+# patch_share_interactive — the share page explains the game in three lines once the reader has taken a side.
+# Facts about the game, never a verdict; nothing about price or value (the wording test sweeps these).
+HOW_IT_WORKS = (
+    "Verisphere is a game of claims: people stake VSP to support or challenge them, and the stake behind each side is the score you see.",
+    "Every day at 00:00 UTC each claim settles. Stake on the side the stake and the linked evidence favour earns VSP; stake on the other side loses some.",
+    "Taking a side here costs nothing and counts for nothing in the game. Backing it with VSP is what moves the score.",
+)
 
 
 # ── data ────────────────────────────────────────────────────────────────────────────────────────────
@@ -299,7 +310,64 @@ def _cached_card(db: Session, post_id: int, base: str) -> bytes:
     return png
 
 
+# ── opinions (patch_share_interactive) ──────────────────────────────────────────────────────────────
+# A reader's Support / Challenge on the share page. Stored as daily counts per claim and side — no per-visitor row,
+# no IP, no wallet — so nothing here can be joined to a person. Not a stake: never read by settlement or the score.
+
+SIDES = ("support", "challenge")
+
+
+class OpinionIn(BaseModel):
+    side: str
+
+
+def record_opinion(db: Session, post_id: int, side: str) -> None:
+    col = "support_n" if side == "support" else "challenge_n"
+    db.execute(sql_text(
+        f"INSERT INTO claim_opinion_daily (post_id, day, {col}) VALUES (:pid, CURRENT_DATE, 1) "
+        f"ON CONFLICT (post_id, day) DO UPDATE SET {col} = claim_opinion_daily.{col} + 1"), {"pid": post_id})
+    db.commit()
+
+
+def opinion_counts(db: Session, post_id: int) -> dict:
+    row = db.execute(sql_text(
+        "SELECT COALESCE(SUM(support_n), 0), COALESCE(SUM(challenge_n), 0) FROM claim_opinion_daily WHERE post_id = :pid"),
+        {"pid": post_id}).one()
+    s, c = int(row[0]), int(row[1])
+    return {"post_id": post_id, "support_n": s, "challenge_n": c, "total": s + c,
+            "support_pct": (int(round(100 * s / (s + c))) if s + c else None)}
+
+
+def _claim_exists(db: Session, post_id: int) -> bool:
+    from chain.chain_db import get_post_info
+    info = get_post_info(db, post_id)
+    return bool(info) and info.get("content_type", 0) == 0
+
+
 # ── routes ──────────────────────────────────────────────────────────────────────────────────────────
+
+@router.get("/api/claims/{post_id}/opinion")
+def claim_opinion_get(post_id: int, db: Session = Depends(get_db)):
+    if not _claim_exists(db, post_id):
+        raise HTTPException(404, f"Claim {post_id} not found")
+    return opinion_counts(db, post_id)
+
+
+@router.post("/api/claims/{post_id}/opinion")
+def claim_opinion_post(post_id: int, body: OpinionIn, db: Session = Depends(get_db)):
+    if body.side not in SIDES:
+        raise HTTPException(400, "side must be 'support' or 'challenge'")
+    if not _claim_exists(db, post_id):
+        raise HTTPException(404, f"Claim {post_id} not found")
+    record_opinion(db, post_id, body.side)
+    return opinion_counts(db, post_id)
+
+
+@router.get("/c/snapshot.js")
+def share_script():
+    return Response(content=_SCRIPT.read_bytes(), media_type="application/javascript",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
 
 @router.get("/api/claims/{post_id}/snapshot")
 def claim_snapshot(post_id: int, request: Request, db: Session = Depends(get_db)):
@@ -315,12 +383,16 @@ def claim_card(post_id: int, request: Request, db: Session = Depends(get_db)):
 
 @router.api_route("/c/{post_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
-    """What a pasted link unfurls into. No scripts (the edge CSP allows none inline); a plain link into the app."""
+    """What a pasted link unfurls into — and, since patch_share_interactive, the first move: Support / Challenge without
+    a wallet, then three lines on the game and one button into the app. No inline script (the edge CSP allows none);
+    the page's one script is served same-origin at /c/snapshot.js. Without JS the invitation button still works."""
     snap = build_snapshot(db, post_id, _public_base(request))
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])
     question = escape(snap["invite_question"]); call = escape(snap["invite_call"])  # patch_snapshot_invite
+    pct = "" if snap["support_pct"] is None else str(snap["support_pct"])
+    how = "".join(f"<li>{escape(line)}</li>" for line in HOW_IT_WORKS)
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claim #{post_id} · Verisphere</title>
@@ -334,12 +406,27 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
 <link rel="canonical" href="{share}">
 <style>body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#F7F5FE;color:#1C1533}}
 main{{max-width:760px;margin:0 auto;padding:24px 16px 48px}}img{{width:100%;height:auto;border-radius:16px;border:1px solid #E4E1F2;background:#fff}}
-a.btn{{display:inline-block;margin-top:20px;padding:14px 22px;border-radius:999px;background:#5B4BC4;color:#fff;text-decoration:none;font-weight:600;font-size:16px}}
-p{{color:#5D5776;font-size:15px;line-height:1.5}}h2{{font-size:22px;margin:24px 0 0}}</style></head>
+a.btn{{display:inline-block;margin-top:16px;padding:14px 22px;border-radius:999px;background:#5B4BC4;color:#fff;text-decoration:none;font-weight:600;font-size:16px}}
+p{{color:#5D5776;font-size:15px;line-height:1.5}}h2{{font-size:22px;margin:24px 0 10px}}
+.sides{{display:flex;gap:10px;margin:0 0 12px}}button.side{{flex:1;padding:14px 10px;border-radius:12px;border:2px solid #E4E1F2;background:#fff;font:600 16px system-ui,sans-serif;cursor:pointer;color:#1C1533}}
+button.side[data-side=support]{{border-color:#16A34A;color:#15803D}}button.side[data-side=challenge]{{border-color:#DC2626;color:#B91C1C}}
+button.side.chosen{{color:#fff}}button.side.chosen[data-side=support]{{background:#16A34A}}button.side.chosen[data-side=challenge]{{background:#DC2626}}
+button.side.other{{opacity:.45;border-color:#E4E1F2;color:#8A84A6}}
+#ts-verdict{{font-size:18px;font-weight:600;margin:14px 0 4px}}#ts-readers{{color:#8A84A6;font-size:13px;margin:0 0 8px}}
+ol.how{{color:#5D5776;font-size:15px;line-height:1.5;padding-left:20px;margin:12px 0 0}}ol.how li{{margin-bottom:6px}}
+small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></head>
 <body><main>
 <img src="{card}" alt="Verisphere Snapshot of claim #{post_id}: {title}">
-<h2>{question}</h2>
-<a class="btn" href="{app_url}">{call} on Verisphere</a>
-<p>Verisphere is a truth-staking protocol: people stake VSP to support or challenge factual claims, and every claim settles once a day. The score above is the stake behind each side right now, not a verdict; it changes as people stake.</p>
-</main></body></html>"""
+<section id="take-side" data-post="{post_id}" data-pct="{pct}" data-app="{app_url}">
+<h2 id="ts-ask">Is this claim accurate?</h2>
+<div class="sides"><button type="button" class="side" data-side="support">Support</button><button type="button" class="side" data-side="challenge">Challenge</button></div>
+<div id="ts-verdict" hidden></div>
+<div id="ts-readers" hidden></div>
+<ol id="ts-how" class="how" hidden>{how}</ol>
+<a class="btn" id="ts-back" href="{app_url}" hidden>Back it with VSP</a>
+</section>
+<noscript><h2>{question}</h2><a class="btn" href="{app_url}">{call} on Verisphere</a></noscript>
+<p>The score on the card is the stake behind each side right now, not a verdict; it changes as people stake. Taking a side here is anonymous: nothing about you is stored, only a daily count per side.</p>
+<small>Claim #{post_id} · <a href="{app_url}">open it on Verisphere</a></small>
+</main><script src="/c/snapshot.js" defer></script></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
