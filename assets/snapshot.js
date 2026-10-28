@@ -16,6 +16,9 @@
   var how = document.getElementById("ts-how");
   var back = document.getElementById("ts-back");
   var ask = document.getElementById("ts-ask");
+  var switchWrap = document.getElementById("ts-switch-wrap");
+  var switchLink = document.getElementById("ts-switch");
+  var current = null;  // patch_share_switch: the side currently counted for this visitor
 
   function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function remember(side) { try { localStorage.setItem(key, side); } catch (e) { /* private mode */ } }
@@ -28,6 +31,7 @@
   }
 
   function show(side, counts) {
+    current = side;
     for (var i = 0; i < buttons.length; i++) {
       var b = buttons[i];
       b.disabled = true;
@@ -45,6 +49,10 @@
     how.hidden = false;
     back.href = app + "&side=" + side;
     back.hidden = false;
+    if (switchWrap && switchLink) {
+      switchLink.textContent = side === "support" ? "Challenge instead" : "Support instead";
+      switchWrap.hidden = false;
+    }
   }
 
   function request(method, body) {
@@ -62,6 +70,17 @@
         request("POST", { side: side }).then(function (counts) { if (counts) show(side, counts); });
       });
     })(buttons[i]);
+  }
+
+  if (switchLink) {
+    switchLink.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      if (!current) return;
+      var from = current, side = current === "support" ? "challenge" : "support";
+      remember(side);
+      show(side, null);
+      request("POST", { side: side, from_side: from }).then(function (counts) { if (counts) show(side, counts); });
+    });
   }
 
   var prev = remembered();

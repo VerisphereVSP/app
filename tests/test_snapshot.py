@@ -179,6 +179,7 @@ class TestSharePage:
         assert '<section id="take-side" data-post="142" data-pct="72" data-app="https://app.verisphere.co/claims?post=142">' in h
         assert 'data-side="support">Support</button>' in h and 'data-side="challenge">Challenge</button>' in h
         assert 'id="ts-back" href="https://app.verisphere.co/claims?post=142" hidden>Back it with VSP</a>' in h
+        assert 'Changed your mind? <a href="#" id="ts-switch">' in h  # patch_share_switch
         for line in snapshot.HOW_IT_WORKS:
             assert line in h
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
@@ -231,6 +232,21 @@ class TestOpinions:
         assert (d["support_n"], d["challenge_n"], d["total"], d["support_pct"]) == (2, 1, 3, 67)
         assert c.get("/api/claims/17/opinion").json()["total"] == 0  # per claim
 
+    def test_change_of_mind_moves_the_count(self, sqlite_client):  # patch_share_switch
+        c = sqlite_client
+        c.post("/api/claims/142/opinion", json={"side": "support"})
+        d = c.post("/api/claims/142/opinion", json={"side": "challenge", "from_side": "support"}).json()
+        assert (d["support_n"], d["challenge_n"], d["total"]) == (0, 1, 1)
+        d = c.post("/api/claims/142/opinion", json={"side": "support", "from_side": "challenge"}).json()
+        assert (d["support_n"], d["challenge_n"], d["total"]) == (1, 0, 1)
+        # nothing to uncount (e.g. counted on another day, or a made-up from_side): floored at zero, never negative
+        d = c.post("/api/claims/17/opinion", json={"side": "support", "from_side": "challenge"}).json()
+        assert (d["support_n"], d["challenge_n"]) == (1, 0)
+        d = c.post("/api/claims/17/opinion", json={"side": "support", "from_side": "support"}).json()  # same side: a plain count
+        assert d["support_n"] == 2
+        d = c.post("/api/claims/17/opinion", json={"side": "support", "from_side": "banana"}).json()  # unknown: ignored
+        assert d["support_n"] == 3
+
     def test_only_counts_are_stored(self, sqlite_client):
         """Anonymity rule: the table has exactly the count columns — nothing per visitor, no IP, no wallet, no time of day."""
         raw = (ROOT / "ops" / "compose" / "migrations" / "340_claim_opinion_daily.sql").read_text().lower()
@@ -252,6 +268,7 @@ class TestOpinions:
         assert r.status_code == 200 and r.headers["content-type"].startswith("application/javascript")
         js = r.text
         assert 'getElementById("take-side")' in js and '"/api/claims/" + pid + "/opinion"' in js and "localStorage" in js
+        assert "from_side: from" in js and 'getElementById("ts-switch")' in js  # patch_share_switch
         assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
 
     def test_explainer_wording(self):

@@ -319,13 +319,24 @@ SIDES = ("support", "challenge")
 
 class OpinionIn(BaseModel):
     side: str
+    from_side: str | None = None  # patch_share_switch: the side being left, when the reader changes their mind
 
 
-def record_opinion(db: Session, post_id: int, side: str) -> None:
+def record_opinion(db: Session, post_id: int, side: str, from_side: str | None = None) -> None:
+    """Count one opinion for `side`; with `from_side` (a change of mind) also uncount one from that side — on today's
+    row, floored at zero, since the original may have been counted on an earlier day. Purely advisory counts, so the
+    client's word for `from_side` is taken as is."""
     col = "support_n" if side == "support" else "challenge_n"
-    db.execute(sql_text(
-        f"INSERT INTO claim_opinion_daily (post_id, day, {col}) VALUES (:pid, CURRENT_DATE, 1) "
-        f"ON CONFLICT (post_id, day) DO UPDATE SET {col} = claim_opinion_daily.{col} + 1"), {"pid": post_id})
+    if from_side in SIDES and from_side != side:
+        other = "support_n" if from_side == "support" else "challenge_n"
+        db.execute(sql_text(
+            f"INSERT INTO claim_opinion_daily (post_id, day, {col}) VALUES (:pid, CURRENT_DATE, 1) "
+            f"ON CONFLICT (post_id, day) DO UPDATE SET {col} = claim_opinion_daily.{col} + 1, "
+            f"{other} = CASE WHEN claim_opinion_daily.{other} > 0 THEN claim_opinion_daily.{other} - 1 ELSE 0 END"), {"pid": post_id})
+    else:
+        db.execute(sql_text(
+            f"INSERT INTO claim_opinion_daily (post_id, day, {col}) VALUES (:pid, CURRENT_DATE, 1) "
+            f"ON CONFLICT (post_id, day) DO UPDATE SET {col} = claim_opinion_daily.{col} + 1"), {"pid": post_id})
     db.commit()
 
 
@@ -359,7 +370,7 @@ def claim_opinion_post(post_id: int, body: OpinionIn, db: Session = Depends(get_
         raise HTTPException(400, "side must be 'support' or 'challenge'")
     if not _claim_exists(db, post_id):
         raise HTTPException(404, f"Claim {post_id} not found")
-    record_opinion(db, post_id, body.side)
+    record_opinion(db, post_id, body.side, body.from_side)
     return opinion_counts(db, post_id)
 
 
@@ -412,7 +423,8 @@ p{{color:#5D5776;font-size:15px;line-height:1.5}}h2{{font-size:22px;margin:24px 
 button.side[data-side=support]{{border-color:#16A34A;color:#15803D}}button.side[data-side=challenge]{{border-color:#DC2626;color:#B91C1C}}
 button.side.chosen{{color:#fff}}button.side.chosen[data-side=support]{{background:#16A34A}}button.side.chosen[data-side=challenge]{{background:#DC2626}}
 button.side.other{{opacity:.45;border-color:#E4E1F2;color:#8A84A6}}
-#ts-verdict{{font-size:18px;font-weight:600;margin:14px 0 4px}}#ts-readers{{color:#8A84A6;font-size:13px;margin:0 0 8px}}
+#ts-verdict{{font-size:18px;font-weight:600;margin:14px 0 4px}}#ts-readers{{color:#8A84A6;font-size:13px;margin:0 0 4px}}
+.switch{{color:#8A84A6;font-size:13px;margin:0 0 8px}}.switch a{{color:#5B4BC4}}
 ol.how{{color:#5D5776;font-size:15px;line-height:1.5;padding-left:20px;margin:12px 0 0}}ol.how li{{margin-bottom:6px}}
 small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></head>
 <body><main>
@@ -422,6 +434,7 @@ small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></hea
 <div class="sides"><button type="button" class="side" data-side="support">Support</button><button type="button" class="side" data-side="challenge">Challenge</button></div>
 <div id="ts-verdict" hidden></div>
 <div id="ts-readers" hidden></div>
+<div id="ts-switch-wrap" class="switch" hidden>Changed your mind? <a href="#" id="ts-switch">Challenge instead</a></div>
 <ol id="ts-how" class="how" hidden>{how}</ol>
 <a class="btn" id="ts-back" href="{app_url}" hidden>Back it with VSP</a>
 </section>
