@@ -110,6 +110,26 @@ async def lifespan(app):
             cleanup_rate_limiter()
     _aio.create_task(_rl_cleanup())
 
+    # patch_invites: refund invitations past their expiry. Runs here, not in the worker, because the refund is sent
+    # by the escrow (relay) signer, which only the API process holds; the list/peek routes also sweep lazily.
+    async def _invite_expiry_sweep():
+        await _aio.sleep(120)
+        from db import get_session_factory
+        from invites import expire_due
+        while True:
+            try:
+                db = get_session_factory()()
+                try:
+                    n = expire_due(db)
+                    if n:
+                        print(f"invites: refunded {n} expired invitation(s)")
+                finally:
+                    db.close()
+            except Exception as e:
+                print(f"invite expiry sweep error: {e}")
+            await _aio.sleep(3600)
+    _aio.create_task(_invite_expiry_sweep())
+
     # Dupe refresh runs in worker service
 
     # patch_remove_app_refresh: article refresh removed from the API process — it runs in
@@ -197,6 +217,8 @@ app.include_router(claim_atomicity_router)
 app.include_router(relay_gateway_router)
 app.include_router(pool_trade_router)  # patch_pool_trade
 app.include_router(snapshot_router)  # patch_verisnap_share
+from invites import router as invites_router  # patch_invites
+app.include_router(invites_router)  # patch_invites
 
 ADDRESSES_PATH = Path(f"/app/broadcast/Deploy.s.sol/{CHAIN_ID}/addresses.json")
 

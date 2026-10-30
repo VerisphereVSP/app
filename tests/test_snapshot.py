@@ -180,6 +180,7 @@ class TestSharePage:
         assert 'data-side="support">Support</button>' in h and 'data-side="challenge">Challenge</button>' in h
         assert 'id="ts-back" href="https://app.verisphere.co/claims?post=142" hidden>Back it with VSP</a>' in h
         assert 'Changed your mind? <a href="#" id="ts-switch">' in h  # patch_share_switch
+        assert '<div id="ts-invite" class="invite" hidden></div>' in h  # patch_invites
         for line in snapshot.HOW_IT_WORKS:
             assert line in h
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
@@ -269,6 +270,7 @@ class TestOpinions:
         js = r.text
         assert 'getElementById("take-side")' in js and '"/api/claims/" + pid + "/opinion"' in js and "localStorage" in js
         assert "from_side: from" in js and 'getElementById("ts-switch")' in js  # patch_share_switch
+        assert '"/api/invites/peek?code="' in js and '"&start=1"' in js and "on the table for you" in js  # patch_invites
         assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
 
     def test_explainer_wording(self):

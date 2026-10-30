@@ -19,6 +19,8 @@
   var switchWrap = document.getElementById("ts-switch-wrap");
   var switchLink = document.getElementById("ts-switch");
   var current = null;  // patch_share_switch: the side currently counted for this visitor
+  var invite = document.getElementById("ts-invite");
+  var codeSuffix = "";  // patch_invites: "&code=…&start=1" when the link carries an open invitation
 
   function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function remember(side) { try { localStorage.setItem(key, side); } catch (e) { /* private mode */ } }
@@ -47,7 +49,7 @@
       readers.hidden = false;
     }
     how.hidden = false;
-    back.href = app + "&side=" + side;
+    back.href = app + "&side=" + side + codeSuffix;
     back.hidden = false;
     if (switchWrap && switchLink) {
       switchLink.textContent = side === "support" ? "Challenge instead" : "Support instead";
@@ -81,6 +83,24 @@
       show(side, null);
       request("POST", { side: side, from_side: from }).then(function (counts) { if (counts) show(side, counts); });
     });
+  }
+
+  // patch_invites — an invitation in the link: say what is on the table, and hand the code to the app's Start flow
+  var code = null;
+  try { code = new URLSearchParams(window.location.search).get("code"); } catch (e) { /* old browser */ }
+  if (code && invite) {
+    fetch("/api/invites/peek?code=" + encodeURIComponent(code)).then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
+      if (!p) { invite.textContent = "The invitation in this link is not valid."; invite.hidden = false; return; }
+      if (p.status === "open") {
+        codeSuffix = "&code=" + encodeURIComponent(code) + "&start=1";
+        invite.textContent = "Someone put " + p.amount_vsp + " VSP on the table for you. Pick a side, then claim it and back your side.";
+        back.textContent = "Claim your " + p.amount_vsp + " VSP and back it";
+        if (current) back.href = app + "&side=" + current + codeSuffix;
+      } else {
+        invite.textContent = "The invitation in this link was already " + p.status + ".";
+      }
+      invite.hidden = false;
+    }).catch(function () { /* the page works without it */ });
   }
 
   var prev = remembered();
