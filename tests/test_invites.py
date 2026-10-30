@@ -133,6 +133,7 @@ class TestIssue:
         _, c = db_and_client
         d = c.get("/api/invites/config").json()
         assert d["escrow_address"] == ESCROW and d["min_vsp"] == "0.5" and d["max_vsp"] == "100" and d["max_days"] == 365 and d["max_outstanding"] == 100
+        assert d["newcomers_only"] is False  # patch_invites_4: the default lets holders redeem
 
     def test_issue_escrows_and_returns_a_code(self, chain, db_and_client):
         _, c = db_and_client
@@ -178,16 +179,28 @@ class TestRedeem:
         lst = c.get(f"/api/invites?sponsor={sponsor_account().address}").json()["invites"][0]
         assert lst["status"] == "redeemed" and lst["redeemed_by"] == NEWBIE and lst["redeem_tx"].startswith("0x")
 
-    def test_newcomers_only(self, chain, db_and_client):
+    def test_holders_may_redeem_unless_the_knob_says_newcomers_only(self, chain, db_and_client, monkeypatch):  # patch_invites_4
         SessionLocal, c = db_and_client
-        d = issue(c, "1")
-        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": sponsor_account().address}).status_code == 400
-        chain.balances["0x00000000000000000000000000000000000000ee"] = 5
-        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": "0x00000000000000000000000000000000000000ee"}).status_code == 409
+        holder, staker = "0x00000000000000000000000000000000000000ee", "0x00000000000000000000000000000000000000dd"
+        chain.balances[holder] = 5
         with SessionLocal() as db:
             db.execute(text("INSERT INTO chain_user_stake VALUES ('0x00000000000000000000000000000000000000dd', 1, 0, 2.0)")); db.commit()
-        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": "0x00000000000000000000000000000000000000dd"}).status_code == 409
-        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": NEWBIE}).status_code == 200
+        # the sponsor never redeems their own code, whatever the knob says
+        d = issue(c, "1")
+        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": sponsor_account().address}).status_code == 400
+        # default (knob off): a wallet that holds VSP and one that has staked both redeem
+        assert c.post("/api/invites/redeem", json={"code": d["code"], "address": holder}).status_code == 200
+        assert chain.balances[holder] == 5 + 10**18
+        d2 = issue(c, "1")
+        assert c.post("/api/invites/redeem", json={"code": d2["code"], "address": staker}).status_code == 200
+        # knob on: holders and stakers are turned away, a fresh wallet still redeems
+        monkeypatch.setattr(invites, "INVITE_NEWCOMERS_ONLY", True)
+        d3 = issue(c, "1")
+        r = c.post("/api/invites/redeem", json={"code": d3["code"], "address": holder})
+        assert r.status_code == 409 and "newcomers" in r.json()["detail"]
+        assert c.post("/api/invites/redeem", json={"code": d3["code"], "address": staker}).status_code == 409
+        assert c.post("/api/invites/redeem", json={"code": d3["code"], "address": NEWBIE}).status_code == 200
+        assert c.get("/api/invites/config").json()["newcomers_only"] is True
 
     def test_payout_failure_reopens(self, chain, db_and_client):
         _, c = db_and_client
