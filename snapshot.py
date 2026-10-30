@@ -425,12 +425,14 @@ button.side.chosen{{color:#fff}}button.side.chosen[data-side=support]{{backgroun
 button.side.other{{opacity:.45;border-color:#E4E1F2;color:#8A84A6}}
 #ts-verdict{{font-size:18px;font-weight:600;margin:14px 0 4px}}#ts-readers{{color:#8A84A6;font-size:13px;margin:0 0 4px}}
 .switch{{color:#8A84A6;font-size:13px;margin:0 0 8px}}.switch a{{color:#5B4BC4}}
+.invite{{background:#EDEAFB;border:1px solid #D9D4F0;color:#37299B;border-radius:10px;padding:10px 12px;font-size:14px;margin:0 0 12px}}
 ol.how{{color:#5D5776;font-size:15px;line-height:1.5;padding-left:20px;margin:12px 0 0}}ol.how li{{margin-bottom:6px}}
 small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></head>
 <body><main>
 <img src="{card}" alt="Verisphere Snapshot of claim #{post_id}: {title}">
 <section id="take-side" data-post="{post_id}" data-pct="{pct}" data-app="{app_url}">
 <h2 id="ts-ask">Is this claim accurate?</h2>
+<div id="ts-invite" class="invite" hidden></div>
 <div class="sides"><button type="button" class="side" data-side="support">Support</button><button type="button" class="side" data-side="challenge">Challenge</button></div>
 <div id="ts-verdict" hidden></div>
 <div id="ts-readers" hidden></div>

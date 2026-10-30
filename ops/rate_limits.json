@@ -11,6 +11,10 @@
   "default_per_minute": 100,
   "endpoints": {
     "/api/claims/{post_id}/live": 60,
-    "/api/claims/{post_id}/opinion": 12
+    "/api/claims/{post_id}/opinion": 12,
+    "/api/invites": 10,
+    "/api/invites/redeem": 6,
+    "/api/invites/revoke": 10,
+    "/api/invites/peek": 30
   }
 }
