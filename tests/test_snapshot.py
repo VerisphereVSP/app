@@ -82,31 +82,33 @@ class TestSnapshotJson:
         assert d["app_url"] == "https://app.verisphere.co/claims?post=142"
         # patch_snapshot_invite: the text form leads with the invitation question, quotes the claim, states the
         # standing, and ends with the call + link
-        assert d["share_text"] == ("Think it's wrong? “Regular coffee consumption is associated with a lower risk of stroke.” — "
-                                   "72 % of stake on Verisphere backs it (Mostly supported, VS +44). Challenge it: https://app.verisphere.co/c/142")
-        assert d["invite_question"] == "Think it's wrong?" and d["invite_call"] == "Challenge it"
-        assert d["invite_line"] == "Think it's wrong? Challenge it at app.verisphere.co/c/142"
+        # patch_share_chat_text: three lines — question + quote, standing + call, the link alone last
+        assert d["share_text"] == ("“Regular coffee consumption is associated with a lower risk of stroke.”\n"
+                                   "72 % of stake on Verisphere backs it. Agree? Support it. Disagree? Challenge it.\nhttps://app.verisphere.co/c/142")
+        assert d["card_jpg_url"] == "https://app.verisphere.co/api/claims/142/card.jpg"
+        assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it." and d["invite_call"] == "Take a side"
+        assert d["invite_line"] == "Agree? Support it. Disagree? Challenge it. app.verisphere.co/c/142"
         assert d["next_settlement_at"].endswith("T00:00:00Z")
 
     def test_challenged_claim_reads_from_the_challenge_side(self, client):
         d = client.get("/api/claims/17/snapshot").json()
         assert d["band"] == "Strongly challenged" and d["stake_line"] == "80 % of stake challenges this claim"
-        assert d["invite_question"] == "Think it's right?" and d["invite_call"] == "Support it"
-        assert "80 % of stake on Verisphere challenges it (Strongly challenged, VS -73). Support it: " in d["share_text"]
+        assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it."  # symmetric, whatever the standing
+        assert "\n80 % of stake on Verisphere challenges it. Agree? Support it. Disagree? Challenge it.\n" in d["share_text"]
 
     def test_no_stake_and_no_verdict_words(self, client):
         d = client.get("/api/claims/5/snapshot").json()
         assert d["stake_line"] == "No stake yet" and d["band"] == "Contested"
-        assert d["invite_question"] == "Nobody has taken a side yet." and d["invite_call"] == "Be the first"
-        assert "no stake on Verisphere so far (Contested, VS +0). Be the first: " in d["share_text"]
+        assert d["invite_question"] == "No one has taken a side yet." and d["invite_call"] == "Be the first"
+        assert "\nNo stake on Verisphere so far. No one has taken a side yet.\n" in d["share_text"]
         for pid in (5, 17, 142):
             d = client.get(f"/api/claims/{pid}/snapshot").json()
             words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text", "invite_line")).lower()
             for banned in ("true", "false", "price", "value", "invest"):
                 assert banned not in words, (pid, banned)
 
-    def test_contested_with_stake_asks_which_side(self):
-        assert snapshot.invite_for("neutral", 55) == ("Which side are you on?", "Take a side")
+    def test_contested_with_stake_gets_the_same_symmetric_line(self):
+        assert snapshot.invite_for("neutral", 55) == ("Agree? Support it. Disagree? Challenge it.", "Take a side")
 
     def test_links_and_unknown_are_404(self, client):
         assert client.get("/api/claims/9/snapshot").status_code == 404
@@ -130,6 +132,15 @@ class TestCard:
         r2 = client.get("/api/claims/142/card.png")
         assert r2.content == r.content and calls == []  # served from the 60 s cache
 
+    def test_jpeg_card_for_previews(self, client):  # patch_share_chat_text
+        from PIL import Image
+        import io
+        r = client.get("/api/claims/142/card.jpg")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+        im = Image.open(io.BytesIO(r.content))
+        assert im.format == "JPEG" and im.size == (1200, 630) and len(r.content) < 300_000
+        assert client.head("/api/claims/142/card.jpg").status_code == 200
+
     def test_fit_keeps_44px_for_short_and_shrinks_long_without_cutting(self):
         from PIL import Image, ImageDraw
         d = ImageDraw.Draw(Image.new("RGB", (10, 10)))
@@ -152,9 +163,9 @@ class TestCard:
         def footer(pid):
             png = snapshot.render_card(snapshot.build_snapshot(None, pid, "https://app.verisphere.co"))
             im = Image.open(io.BytesIO(png)).convert("RGB")
-            return im.crop((56, 630 - 40 - 28, 700, 630 - 40))
+            return im.crop((56, 630 - 40 - 28, 1144, 630 - 40))  # the whole footer line (question + url)
         a, b, c = footer(142), footer(17), footer(5)
-        assert a.tobytes() != b.tobytes() and b.tobytes() != c.tobytes()
+        assert a.tobytes() != b.tobytes() and b.tobytes() != c.tobytes()  # the url differs per claim; the no-stake line differs in words
         for im in (a, b, c):
             assert any(col == (0x37, 0x29, 0x9B) for _, col in im.getcolors(1 << 20)), "no violet call/url in the footer"
 
@@ -170,7 +181,9 @@ class TestSharePage:
         r = client.get("/c/142", headers={"x-forwarded-proto": "https", "x-forwarded-host": "app.verisphere.co"})
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         h = r.text
-        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/card.png">' in h
+        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/card.jpg">' in h  # patch_share_chat_text
+        assert '<meta property="og:image:type" content="image/jpeg">' in h and 'twitter:image" content="https://app.verisphere.co/api/claims/142/card.jpg"' in h
+        assert '<img src="https://app.verisphere.co/api/claims/142/card.png"' in h  # the page itself keeps the PNG
         assert '<meta name="twitter:card" content="summary_large_image">' in h
         assert 'og:title" content="Regular coffee consumption' in h
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
@@ -184,8 +197,8 @@ class TestSharePage:
         for line in snapshot.HOW_IT_WORKS:
             assert line in h
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
-        assert "<noscript><h2>Think it&#x27;s wrong?</h2>" in h and ">Challenge it on Verisphere</a>" in h  # patch_snapshot_invite (no-JS path)
-        assert ">Support it on Verisphere</a>" in client.get("/c/17").text
+        assert "<noscript><h2>Agree? Support it. Disagree? Challenge it.</h2>" in h and ">Take a side on Verisphere</a>" in h  # no-JS path
+        assert ">Take a side on Verisphere</a>" in client.get("/c/17").text
         assert 'data-pct=""' in client.get("/c/5").text  # no stake → the script says so instead of a percentage
         assert client.head("/c/142").status_code == 200 and client.head("/api/claims/142/card.png").status_code == 200
 
