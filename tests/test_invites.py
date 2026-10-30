@@ -27,8 +27,8 @@ NEWBIE = "0x00000000000000000000000000000000000000ab"
 
 
 def sqlite_ddl() -> str:
-    raw = (ROOT / "ops" / "compose" / "migrations" / "350_invite_code.sql").read_text()
-    ddl = "\n".join(l for l in raw.splitlines() if not l.startswith("--"))
+    raw = (ROOT / "ops" / "compose" / "migrations" / "350_invite_code.sql").read_text() + (ROOT / "ops" / "compose" / "migrations" / "351_invite_code_post.sql").read_text()
+    ddl = "\n".join(l for l in raw.splitlines() if not l.startswith("--")).replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN")
     ddl = ddl.replace("BIGSERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
     ddl = ddl.replace("TIMESTAMPTZ NOT NULL DEFAULT now()", "TEXT NOT NULL DEFAULT (datetime('now'))")
     ddl = ddl.replace("TIMESTAMPTZ", "TEXT").replace("NUMERIC(78,0)", "TEXT")
@@ -110,8 +110,8 @@ def permit_for(amount_vsp: str, spender=ESCROW):
             "value": str(int(float(amount_vsp) * 10 ** 18)), "deadline": int(time.time()) + 3600, "v": 27, "r": "0x" + "00" * 32, "s": "0x" + "00" * 32}
 
 
-def issue(client, amount="2", days=30):
-    r = client.post("/api/invites", json={"amount_vsp": amount, "expires_days": days, "permit": permit_for(amount)})
+def issue(client, amount="2", days=30, post_id=None):
+    r = client.post("/api/invites", json={"amount_vsp": amount, "expires_days": days, "permit": permit_for(amount), "post_id": post_id})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -168,7 +168,7 @@ class TestRedeem:
         _, c = db_and_client
         d = issue(c, "3")
         p = c.get(f"/api/invites/peek?code={d['code'].lower()}").json()
-        assert p == {"status": "open", "amount_vsp": "3", "expires_at": d["expires_at"]}
+        assert p == {"status": "open", "amount_vsp": "3", "expires_at": d["expires_at"], "post_id": None}
         assert c.get("/api/invites/peek?code=VSP-AAAA-BBBB-CCCC").status_code == 404
         r = c.post("/api/invites/redeem", json={"code": d["code"].replace("-", ""), "address": NEWBIE})
         assert r.status_code == 200 and r.json()["amount_vsp"] == "3"
@@ -226,6 +226,18 @@ class TestRevoke:
         assert chain.pays == [(sponsor_account().address.lower(), 4 * 10 ** 18)]
         assert c.post("/api/invites/revoke", json={"code_hash": d["code_hash"], "ts": ts, "signature": sig}).status_code == 409
         assert c.post("/api/invites/redeem", json={"code": d["code"], "address": NEWBIE}).status_code == 409
+
+
+class TestClaimTie:
+    def test_invitation_remembers_the_claim_it_was_shared_from(self, chain, db_and_client):  # patch_invites_2
+        _, c = db_and_client
+        d = issue(c, "1", post_id=116)
+        assert d["post_id"] == 116
+        assert c.get(f"/api/invites/peek?code={d['code']}").json()["post_id"] == 116
+        rows = c.get(f"/api/invites?sponsor={sponsor_account().address}").json()["invites"]
+        assert rows[0]["post_id"] == 116
+        d2 = issue(c, "1")  # from Positions: no claim
+        assert d2["post_id"] is None
 
 
 class TestEscrow:
