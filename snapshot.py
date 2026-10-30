@@ -89,17 +89,12 @@ def next_settlement(now: datetime | None = None) -> datetime:
 
 
 def invite_for(role: str, pct: int | None) -> tuple[str, str]:
-    """patch_snapshot_invite — the card's last line and the text form's lead, as a (question, call) pair.
-    The question invites the reader to take the other side of the current standing; it is about the game's
-    standing, never a verdict (no 'true'/'false'), and it is the same text on the card, in the share text and
-    on the share page so a pasted snapshot reads the same everywhere."""
+    """patch_snapshot_invite / patch_invite_wording — the card's last line and the text form's call, as a
+    (question, call) pair. Symmetric since 10-30 (Lavey): it no longer presumes which side the reader is on. About the
+    game, never a verdict (no 'true'/'false'); the same text on the card, in the share text and on the share page."""
     if pct is None:
-        return "Nobody has taken a side yet.", "Be the first"
-    if role == "support":
-        return "Think it's wrong?", "Challenge it"
-    if role == "challenge":
-        return "Think it's right?", "Support it"
-    return "Which side are you on?", "Take a side"
+        return "No one has taken a side yet.", "Be the first"
+    return "Agree? Support it. Disagree? Challenge it.", "Take a side"
 
 
 def _public_base(request: Request) -> str:
@@ -135,12 +130,14 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
     # patch_snapshot_invite — the invitation (card's last line, share text's lead, share page heading)
     question, call = invite_for(role, pct)
     share_url = f"{base}/c/{post_id}"
-    invite_line = f"{question} {call} at {share_url.replace('https://', '').replace('http://', '')}"
+    invite_line = f"{question} {share_url.replace('https://', '').replace('http://', '')}"
     standing = (f"{pct} % of stake on Verisphere backs it" if pct is not None and role == "support"
                 else f"{100 - pct} % of stake on Verisphere challenges it" if pct is not None and role == "challenge"
                 else f"stake on Verisphere is split {pct} / {100 - pct}" if pct is not None
                 else "no stake on Verisphere so far")
-    share_text = f"{question} “{text}” — {standing} ({band}, VS {vs:+.0f}). {call}: {share_url}"
+    # patch_share_chat_text: three short lines — the preview card already shows the band and the stake, and chat apps
+    # unfurl a link best when it stands alone on the last line
+    share_text = f"\u201c{text}\u201d\n{standing[0].upper()}{standing[1:]}. {question}\n{share_url}"
     return {
         "post_id": post_id,
         "text": text,
@@ -157,6 +154,7 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
         "next_settlement_at": next_settlement(now).isoformat().replace("+00:00", "Z"),
         "share_url": share_url,
         "card_url": f"{base}/api/claims/{post_id}/card.png",
+        "card_jpg_url": f"{base}/api/claims/{post_id}/card.jpg",  # patch_share_chat_text: what link previews point at
         "app_url": f"{base}/claims?post={post_id}",
         "invite_question": question,
         "invite_call": call,
@@ -288,26 +286,39 @@ def render_card(snap: dict) -> bytes:
     f24 = _font(24)
     q = snap["invite_question"] + " "
     d.text((pad_x, CARD_H - 40 - 28), q, font=f24, fill=INK)
-    call = f"{snap['invite_call']} at {snap['share_url'].replace('https://', '').replace('http://', '')}"
+    call = snap['share_url'].replace('https://', '').replace('http://', '')
     d.text((pad_x + d.textlength(q, font=f24), CARD_H - 40 - 28), call, font=f24, fill=VIOLET_DEEP)
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
-def _cached_card(db: Session, post_id: int, base: str) -> bytes:
+def to_jpeg(png: bytes, quality: int = 86) -> bytes:
+    """patch_share_chat_text: the same card as a JPEG (~50 KB). WhatsApp and some other chat apps show the large preview
+    reliably for a JPEG under ~300 KB and fall back to a small square for a PNG; the PNG stays for Copy image."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(png)).convert("RGB")
+    out = io.BytesIO()
+    im.save(out, format="JPEG", quality=quality, optimize=True, progressive=True)
+    return out.getvalue()
+
+
+def _cached_card(db: Session, post_id: int, base: str, fmt: str = "png") -> bytes:
     now = time.time()
+    key = post_id if fmt == "png" else (post_id, fmt)
     with _card_lock:
-        hit = _card_cache.get(post_id)
+        hit = _card_cache.get(key)
         if hit and now - hit[0] < CARD_TTL_SEC:
             return hit[1]
     snap = build_snapshot(db, post_id, base)
-    png = render_card(snap)
+    data = render_card(snap)
+    if fmt == "jpg":
+        data = to_jpeg(data)
     with _card_lock:
         if len(_card_cache) >= _CARD_CACHE_MAX:
             _card_cache.clear()
-        _card_cache[post_id] = (now, png)
-    return png
+        _card_cache[key] = (now, data)
+    return data
 
 
 # ── opinions (patch_share_interactive) ──────────────────────────────────────────────────────────────
@@ -392,6 +403,14 @@ def claim_card(post_id: int, request: Request, db: Session = Depends(get_db)):
                     headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
 
 
+@router.api_route("/api/claims/{post_id}/card.jpg", methods=["GET", "HEAD"])
+def claim_card_jpg(post_id: int, request: Request, db: Session = Depends(get_db)):
+    """patch_share_chat_text: the preview image for link unfurls (see to_jpeg)."""
+    jpg = _cached_card(db, post_id, _public_base(request), "jpg")
+    return Response(content=jpg, media_type="image/jpeg",
+                    headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
+
+
 @router.api_route("/c/{post_id}", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     """What a pasted link unfurls into — and, since patch_share_interactive, the first move: Support / Challenge without
@@ -401,6 +420,7 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])
+    preview = escape(snap["card_jpg_url"])  # patch_share_chat_text: previews get the JPEG; the page shows the PNG
     question = escape(snap["invite_question"]); call = escape(snap["invite_call"])  # patch_snapshot_invite
     pct = "" if snap["support_pct"] is None else str(snap["support_pct"])
     how = "".join(f"<li>{escape(line)}</li>" for line in HOW_IT_WORKS)
@@ -410,10 +430,10 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
 <meta name="description" content="{desc}">
 <meta property="og:type" content="website"><meta property="og:site_name" content="Verisphere">
 <meta property="og:title" content="{title}"><meta property="og:description" content="{desc}">
-<meta property="og:url" content="{share}"><meta property="og:image" content="{card}">
-<meta property="og:image:width" content="{CARD_W}"><meta property="og:image:height" content="{CARD_H}">
+<meta property="og:url" content="{share}"><meta property="og:image" content="{preview}"><meta property="og:image:secure_url" content="{preview}">
+<meta property="og:image:type" content="image/jpeg"><meta property="og:image:width" content="{CARD_W}"><meta property="og:image:height" content="{CARD_H}">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{title}">
-<meta name="twitter:description" content="{desc}"><meta name="twitter:image" content="{card}">
+<meta name="twitter:description" content="{desc}"><meta name="twitter:image" content="{preview}">
 <link rel="canonical" href="{share}">
 <style>body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#F7F5FE;color:#1C1533}}
 main{{max-width:760px;margin:0 auto;padding:24px 16px 48px}}img{{width:100%;height:auto;border-radius:16px;border:1px solid #E4E1F2;background:#fff}}
