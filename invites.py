@@ -174,6 +174,7 @@ def _row(r) -> dict:
         "amount_wei": str(int(m["amount_wei"])), "created_at": _iso(m["created_at"]), "expires_at": _iso(m["expires_at"]),
         "status": m["status"], "redeemed_by": m["redeemed_by"], "redeemed_at": _iso(m["redeemed_at"]),
         "escrow_tx": m["escrow_tx"], "redeem_tx": m["redeem_tx"], "refund_tx": m["refund_tx"], "closed_at": _iso(m["closed_at"]),
+        "post_id": int(m["post_id"]) if m["post_id"] is not None else None,
     }
 
 
@@ -244,6 +245,7 @@ class IssueIn(BaseModel):
     amount_vsp: str
     expires_days: int = 30
     permit: PermitIn
+    post_id: int | None = None  # patch_invites_2: the claim this was shared from, if any
 
 
 class RedeemIn(BaseModel):
@@ -292,13 +294,13 @@ def invites_issue(body: IssueIn, db: Session = Depends(get_db)):
     h = code_hash(code)
     expires = _now() + timedelta(days=body.expires_days)
     db.execute(sql_text(
-        "INSERT INTO invite_code (code_hash, sponsor, amount_wei, created_at, expires_at, escrow_tx, status) "
-        "VALUES (:h, :s, :a, :c, :e, :tx, 'open')"),
-        {"h": h, "s": sponsor, "a": str(amount_wei), "c": _now(), "e": expires, "tx": tx})
+        "INSERT INTO invite_code (code_hash, sponsor, amount_wei, created_at, expires_at, escrow_tx, status, post_id) "
+        "VALUES (:h, :s, :a, :c, :e, :tx, 'open', :p)"),
+        {"h": h, "s": sponsor, "a": str(amount_wei), "c": _now(), "e": expires, "tx": tx, "p": body.post_id})
     db.commit()
     _tx_log(db, tx, sponsor, "invite_escrow", amount)
     return {"code": code, "code_hash": h, "amount_vsp": _vsp(amount_wei), "expires_at": _iso(expires), "escrow_tx": tx,
-            "sponsor": sponsor}
+            "sponsor": sponsor, "post_id": body.post_id}
 
 
 @router.get("/api/invites/peek")
@@ -309,7 +311,7 @@ def invites_peek(code: str = Query(...), db: Session = Depends(get_db)):
     status = row["status"]
     if status == "open" and _as_dt(row["expires_at"]) <= _now():
         status = "expired"
-    return {"status": status, "amount_vsp": row["amount_vsp"], "expires_at": row["expires_at"]}
+    return {"status": status, "amount_vsp": row["amount_vsp"], "expires_at": row["expires_at"], "post_id": row["post_id"]}
 
 
 @router.post("/api/invites/redeem")
