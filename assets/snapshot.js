@@ -20,7 +20,8 @@
   var switchLink = document.getElementById("ts-switch");
   var current = null;  // patch_share_switch: the side currently counted for this visitor
   var invite = document.getElementById("ts-invite");
-  var codeSuffix = "";  // patch_invites: "&code=…&start=1" when the link carries an open invitation
+  var codeSuffix = "";  // patch_invites: "&code=…" when the link carries an open invitation
+  var START = "&start=1";  // patch_share_start: the app opens its Start walk-through for every reader who taps the button
 
   function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function remember(side) { try { localStorage.setItem(key, side); } catch (e) { /* private mode */ } }
@@ -49,7 +50,7 @@
       readers.hidden = false;
     }
     how.hidden = false;
-    back.href = app + "&side=" + side + codeSuffix;
+    back.href = app + "&side=" + side + START + codeSuffix;
     back.hidden = false;
     if (switchWrap && switchLink) {
       switchLink.textContent = side === "support" ? "Challenge instead" : "Support instead";
@@ -92,10 +93,10 @@
     fetch("/api/invites/peek?code=" + encodeURIComponent(code)).then(function (r) { return r.ok ? r.json() : null; }).then(function (p) {
       if (!p) { invite.textContent = "The invitation in this link is not valid."; invite.hidden = false; return; }
       if (p.status === "open") {
-        codeSuffix = "&code=" + encodeURIComponent(code) + "&start=1";
+        codeSuffix = "&code=" + encodeURIComponent(code);
         invite.textContent = "Someone put " + p.amount_vsp + " VSP on the table for you. Pick a side, then claim it and back your side.";
         back.textContent = "Claim your " + p.amount_vsp + " VSP and back it";
-        if (current) back.href = app + "&side=" + current + codeSuffix;
+        if (current) back.href = app + "&side=" + current + START + codeSuffix;
       } else {
         invite.textContent = "The invitation in this link was already " + p.status + ".";
       }

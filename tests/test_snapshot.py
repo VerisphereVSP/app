@@ -283,7 +283,8 @@ class TestOpinions:
         js = r.text
         assert 'getElementById("take-side")' in js and '"/api/claims/" + pid + "/opinion"' in js and "localStorage" in js
         assert "from_side: from" in js and 'getElementById("ts-switch")' in js  # patch_share_switch
-        assert '"/api/invites/peek?code="' in js and '"&start=1"' in js and "on the table for you" in js  # patch_invites
+        assert '"/api/invites/peek?code="' in js and "on the table for you" in js  # patch_invites
+        assert 'START = "&start=1"' in js and js.count("+ START + codeSuffix") == 2  # patch_share_start: every reader, code or not
         assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
 
     def test_explainer_wording(self):
