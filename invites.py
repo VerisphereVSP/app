@@ -14,8 +14,9 @@ the VSP in their own wallet. Unredeemed by its expiry, or revoked by the sponsor
 
 Escrow for the beta is custodial, in the relay wallet (KMS-signed EOA that already pays gas and used to collect fees);
 every movement is a plain ERC-20 transfer on chain and a row here. An on-chain escrow contract is the v3 upgrade.
-Knobs (env, read at startup): INVITE_MIN_VSP 0.5, INVITE_MAX_VSP 100, INVITE_MAX_DAYS 365, INVITE_MAX_OUTSTANDING 100.
-Redemption rules: an open, unexpired code; a wallet that holds no VSP and has no stake yet; not the sponsor.
+Knobs (env, read at startup): INVITE_MIN_VSP 0.5, INVITE_MAX_VSP 100, INVITE_MAX_DAYS 365, INVITE_MAX_OUTSTANDING 100,
+INVITE_NEWCOMERS_ONLY 0 (patch_invites_4: set to 1 to limit redemption to wallets that hold no VSP and have no stake).
+Redemption rules: an open, unexpired code; not the sponsor; any wallet unless INVITE_NEWCOMERS_ONLY is on.
 The chain side is behind three module functions (escrow_pull / escrow_pay / vsp_balance) so the rest is unit-testable.
 """
 from __future__ import annotations
@@ -52,6 +53,8 @@ INVITE_MIN_VSP = _dec_env("INVITE_MIN_VSP", "0.5")
 INVITE_MAX_VSP = _dec_env("INVITE_MAX_VSP", "100")
 INVITE_MAX_DAYS = int(os.getenv("INVITE_MAX_DAYS", "365"))
 INVITE_MAX_OUTSTANDING = int(os.getenv("INVITE_MAX_OUTSTANDING", "100"))
+# patch_invites_4 — Lavey 10-30: wallets that already hold VSP may accept invitations; this knob closes that at any time
+INVITE_NEWCOMERS_ONLY = os.getenv("INVITE_NEWCOMERS_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
 REVOKE_SIGNATURE_WINDOW_SEC = 600
 
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # Crockford-like: no 0/O/1/I, 32 symbols → 5 bits each
@@ -270,7 +273,8 @@ def _is_address(a: str) -> bool:
 @router.get("/api/invites/config")
 def invites_config():
     return {"escrow_address": escrow_address(), "min_vsp": str(INVITE_MIN_VSP), "max_vsp": str(INVITE_MAX_VSP),
-            "max_days": INVITE_MAX_DAYS, "max_outstanding": INVITE_MAX_OUTSTANDING, "default_days": 30}
+            "max_days": INVITE_MAX_DAYS, "max_outstanding": INVITE_MAX_OUTSTANDING, "default_days": 30,
+            "newcomers_only": INVITE_NEWCOMERS_ONLY}
 
 
 @router.post("/api/invites")
@@ -329,7 +333,7 @@ def invites_redeem(body: RedeemIn, db: Session = Depends(get_db)):
         raise HTTPException(409, "This invitation has expired")
     if addr == row["sponsor"]:
         raise HTTPException(400, "An invitation cannot be redeemed by its sponsor")
-    if vsp_balance(addr) > 0 or _has_stake(db, addr):
+    if INVITE_NEWCOMERS_ONLY and (vsp_balance(addr) > 0 or _has_stake(db, addr)):  # patch_invites_4: knob, default off
         raise HTTPException(409, "Invitations are for newcomers: this wallet already holds or has staked VSP")
     # claim the row first (one redemption per code even under concurrent requests), then pay
     n = db.execute(sql_text(
