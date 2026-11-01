@@ -22,6 +22,15 @@
   var invite = document.getElementById("ts-invite");
   var codeSuffix = "";  // patch_invites: "&code=…" when the link carries an open invitation
   var START = "&start=1";  // patch_share_start: the app opens its Start walk-through for every reader who taps the button
+  // patch_funnel: one anonymous count when the button is tapped — no id, no cookie; the page works the same if it fails
+  function countBack() {
+    try {
+      var body = JSON.stringify({ step: "back_tap" });
+      if (navigator.sendBeacon) { navigator.sendBeacon("/api/funnel", new Blob([body], { type: "application/json" })); return; }
+      fetch("/api/funnel", { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true }).catch(function () {});
+    } catch (e) { /* nothing to do */ }
+  }
+  if (back) back.addEventListener("click", countBack);
 
   function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function remember(side) { try { localStorage.setItem(key, side); } catch (e) { /* private mode */ } }

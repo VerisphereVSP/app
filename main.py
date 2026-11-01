@@ -219,6 +219,8 @@ app.include_router(pool_trade_router)  # patch_pool_trade
 app.include_router(snapshot_router)  # patch_verisnap_share
 from invites import router as invites_router  # patch_invites
 app.include_router(invites_router)  # patch_invites
+from funnel import router as funnel_router  # patch_funnel
+app.include_router(funnel_router)  # patch_funnel
 
 ADDRESSES_PATH = Path(f"/app/broadcast/Deploy.s.sol/{CHAIN_ID}/addresses.json")
 
