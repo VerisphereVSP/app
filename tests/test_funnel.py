@@ -146,3 +146,55 @@ class TestWiring:
             def rollback(self): raise RuntimeError("and again")
         funnel.count(Boom(), "start_open")  # logs, returns
         funnel.count(None, "share_view")    # even without a session
+
+
+class TestWallets:  # patch_funnel_2
+    @pytest.fixture
+    def wallets_harness(self, harness, monkeypatch):
+        S, c = harness
+        with S() as db:
+            db.execute(text("CREATE TABLE invite_code (id INTEGER PRIMARY KEY, code_hash TEXT, sponsor TEXT, amount_wei TEXT, created_at TEXT, expires_at TEXT, "
+                            "escrow_tx TEXT, status TEXT, redeemed_by TEXT, redeemed_at TEXT, redeem_tx TEXT, closed_at TEXT, refund_tx TEXT, post_id INTEGER)"))
+            db.execute(text("CREATE TABLE chain_user_stake (user_address TEXT, post_id INTEGER, side INTEGER, amount REAL)"))
+            db.execute(text("CREATE TABLE tx_log (id INTEGER PRIMARY KEY, user_address TEXT, action_type TEXT, status TEXT, submitted_at TEXT)"))
+            A, B, C = "0x00000000000000000000000000000000000000aa", "0x00000000000000000000000000000000000000bb", "0x00000000000000000000000000000000000000cc"
+            # A: given 2 on claim 142, staked 1.5 there and 1 on claim 17 → beyond the invited claim; holds 1 → own money 1.5
+            db.execute(text("INSERT INTO invite_code (code_hash, sponsor, amount_wei, status, redeemed_by, redeemed_at, post_id) VALUES ('h1','0xs','2000000000000000000','redeemed',:a,'2026-11-01 10:00:00',142)"), {"a": A})
+            db.execute(text("INSERT INTO chain_user_stake VALUES (:a, 142, 0, 1.5), (:a, 17, 1, 1.0)"), {"a": A})
+            # B: given 1 (two codes of 0.5), never staked, holds 1 → nothing of their own
+            db.execute(text("INSERT INTO invite_code (code_hash, sponsor, amount_wei, status, redeemed_by, redeemed_at, post_id) VALUES ('h2','0xs','500000000000000000','redeemed',:b,'2026-11-01 11:00:00',142), ('h3','0xs','500000000000000000','redeemed',:b,'2026-11-01 11:30:00',NULL)"), {"b": B})
+            # C: not sponsored, stakes on its own — appears only in the new-stakers count
+            db.execute(text("INSERT INTO chain_user_stake VALUES (:c, 142, 0, 3.0)"), {"c": C})
+            db.execute(text("INSERT INTO tx_log (user_address, action_type, status, submitted_at) VALUES (:a,'stake','confirmed','2026-11-01 10:05:00'), (:a,'stake','confirmed','2026-11-01 12:00:00'), (:c,'stake','confirmed','2026-10-30 09:00:00'), (:b,'stake','reverted','2026-11-01 11:40:00')"), {"a": A, "b": B, "c": C})
+            # an open, unredeemed code must not appear
+            db.execute(text("INSERT INTO invite_code (code_hash, sponsor, amount_wei, status, post_id) VALUES ('h4','0xs','1000000000000000000','open',142)"))
+            db.commit()
+        monkeypatch.setattr(funnel, "_balance", lambda a: {"0x00000000000000000000000000000000000000aa": 1.0, "0x00000000000000000000000000000000000000bb": 1.0}.get(a))
+        return S, c
+
+    def test_sponsored_wallets_and_what_they_did(self, wallets_harness):
+        _, c = wallets_harness
+        d = c.get("/api/funnel?days=90&wallets=1").json()["wallets"]
+        assert d["summary"] == {"sponsored": 2, "staked": 1, "beyond_invited_claim": 1, "own_vsp": 1}
+        by = {w["address"]: w for w in d["sponsored"]}
+        a = by["0x00000000000000000000000000000000000000aa"]
+        assert (a["codes"], a["given_vsp"], a["invited_to"], a["staked"], a["claims_staked"], a["staked_vsp"]) == (1, 2.0, 142, True, 2, 2.5)
+        assert a["beyond_invited_claim"] is True and a["holds_vsp"] == 1.0 and a["own_vsp"] == 1.5
+        b = by["0x00000000000000000000000000000000000000bb"]
+        assert (b["codes"], b["given_vsp"], b["staked"], b["claims_staked"], b["own_vsp"]) == (2, 1.0, False, 0, 0.0)
+        assert d["sponsored"][0]["address"] == b["address"]  # most recently sponsored first
+        # new staking wallets per day: first confirmed stake per wallet; B's reverted one does not count
+        assert d["new_stakers_by_day"] == [{"day": "2026-10-30", "n": 1}, {"day": "2026-11-01", "n": 1}]
+        # the wallet view is opt-in; the plain report stays small and chain-free
+        assert "wallets" not in c.get("/api/funnel").json()
+
+    def test_wallet_rows_carry_no_contact_fields(self, wallets_harness):
+        _, c = wallets_harness
+        for w in c.get("/api/funnel?wallets=1&days=90").json()["wallets"]["sponsored"]:
+            assert set(w) == {"address", "first_redeemed_at", "codes", "given_vsp", "invited_to", "staked", "claims_staked", "staked_vsp", "beyond_invited_claim", "holds_vsp", "own_vsp"}
+
+    def test_without_the_tables_the_section_is_empty_not_an_error(self, harness, monkeypatch):
+        _, c = harness
+        monkeypatch.setattr(funnel, "_balance", lambda a: None)
+        d = c.get("/api/funnel?wallets=1").json()["wallets"]
+        assert d == {"sponsored": [], "summary": {"sponsored": 0, "staked": 0, "beyond_invited_claim": 0, "own_vsp": 0}, "new_stakers_by_day": []}
