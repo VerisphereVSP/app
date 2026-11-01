@@ -53,9 +53,13 @@ _SCRIPT = Path(__file__).resolve().parent / "assets" / "snapshot.js"  # patch_sh
 
 # patch_share_interactive — the share page explains the game in three lines once the reader has taken a side.
 # Facts about the game, never a verdict; nothing about price or value (the wording test sweeps these).
+# patch_payoff — the one sentence a stranger needs before anything else (Lavey, 11-01, framing "A"): the same words on the
+# share page above the buttons, in the app's Start sheet and at the top of the guide.
+THE_RULE = "Claims settle every day: the side the score favours gains VSP, the other side loses it. Right and early gains the most."
+
 HOW_IT_WORKS = (
     "Verisphere is a game of claims: people stake VSP to support or challenge them, and the stake behind each side is the score you see.",
-    "Every day at 00:00 UTC each claim settles. Stake on the side the stake and the linked evidence favour earns VSP; stake on the other side loses some.",
+    "Every day at 00:00 UTC each claim settles: the side the score (the stake plus its linked evidence) favours gains VSP, the other side loses it. Earlier stakers on a side gain more.",
     "Taking a side here costs nothing and counts for nothing in the game. Backing it with VSP is what moves the score.",
 )
 
@@ -450,6 +454,7 @@ button.side.chosen{{color:#fff}}button.side.chosen[data-side=support]{{backgroun
 button.side.other{{opacity:.45;border-color:#E4E1F2;color:#8A84A6}}
 #ts-verdict{{font-size:18px;font-weight:600;margin:14px 0 4px}}#ts-readers{{color:#8A84A6;font-size:13px;margin:0 0 4px}}
 .switch{{color:#8A84A6;font-size:13px;margin:0 0 8px}}.switch a{{color:#5B4BC4}}
+.rule{{color:#5D5776;font-size:14px;line-height:1.45;margin:0 0 12px}}
 .invite{{background:#EDEAFB;border:1px solid #D9D4F0;color:#37299B;border-radius:10px;padding:10px 12px;font-size:14px;margin:0 0 12px}}
 ol.how{{color:#5D5776;font-size:15px;line-height:1.5;padding-left:20px;margin:12px 0 0}}ol.how li{{margin-bottom:6px}}
 small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></head>
@@ -457,6 +462,7 @@ small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></hea
 <img src="{card}" alt="Verisphere Snapshot of claim #{post_id}: {title}">
 <section id="take-side" data-post="{post_id}" data-pct="{pct}" data-app="{app_url}">
 <h2 id="ts-ask">Is this claim accurate?</h2>
+<p class="rule">{escape(THE_RULE)}</p>
 <div id="ts-invite" class="invite" hidden></div>
 <div class="sides"><button type="button" class="side" data-side="support">Support</button><button type="button" class="side" data-side="challenge">Challenge</button></div>
 <div id="ts-verdict" hidden></div>
