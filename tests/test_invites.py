@@ -27,7 +27,8 @@ NEWBIE = "0x00000000000000000000000000000000000000ab"
 
 
 def sqlite_ddl() -> str:
-    raw = (ROOT / "ops" / "compose" / "migrations" / "350_invite_code.sql").read_text() + (ROOT / "ops" / "compose" / "migrations" / "351_invite_code_post.sql").read_text()
+    raw = (ROOT / "ops" / "compose" / "migrations" / "350_invite_code.sql").read_text() + (ROOT / "ops" / "compose" / "migrations" / "351_invite_code_post.sql").read_text() \
+        + (ROOT / "ops" / "compose" / "migrations" / "360_funnel_daily.sql").read_text()  # patch_funnel: the hooks count here
     ddl = "\n".join(l for l in raw.splitlines() if not l.startswith("--")).replace("ADD COLUMN IF NOT EXISTS", "ADD COLUMN")
     ddl = ddl.replace("BIGSERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
     ddl = ddl.replace("TIMESTAMPTZ NOT NULL DEFAULT now()", "TEXT NOT NULL DEFAULT (datetime('now'))")
@@ -178,6 +179,13 @@ class TestRedeem:
         assert c.post("/api/invites/redeem", json={"code": d["code"], "address": "0x00000000000000000000000000000000000000cd"}).status_code == 409
         lst = c.get(f"/api/invites?sponsor={sponsor_account().address}").json()["invites"][0]
         assert lst["status"] == "redeemed" and lst["redeemed_by"] == NEWBIE and lst["redeem_tx"].startswith("0x")
+        # patch_funnel: issue and redemption are counted as daily totals only (no who)
+        SessionLocal = db_and_client[0]
+        with SessionLocal() as db:
+            rows = {r[0]: r[1] for r in db.execute(text("SELECT step, n FROM funnel_daily")).fetchall()}
+        assert rows == {"invite_issued": 1, "invite_redeemed": 1}
+        with SessionLocal() as db:
+            assert [c[1] for c in db.execute(text("PRAGMA table_info(funnel_daily)")).fetchall()] == ["day", "step", "n"]
 
     def test_holders_may_redeem_unless_the_knob_says_newcomers_only(self, chain, db_and_client, monkeypatch):  # patch_invites_4
         SessionLocal, c = db_and_client

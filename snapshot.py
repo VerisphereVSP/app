@@ -30,6 +30,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from db import get_db
+from funnel import count as funnel_count, is_preview_bot  # patch_funnel
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -382,6 +383,8 @@ def claim_opinion_post(post_id: int, body: OpinionIn, db: Session = Depends(get_
     if not _claim_exists(db, post_id):
         raise HTTPException(404, f"Claim {post_id} not found")
     record_opinion(db, post_id, body.side, body.from_side)
+    if not body.from_side:
+        funnel_count(db, "side_taken")  # patch_funnel: a first side, not a change of mind
     return opinion_counts(db, post_id)
 
 
@@ -417,6 +420,8 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     a wallet, then three lines on the game and one button into the app. No inline script (the edge CSP allows none);
     the page's one script is served same-origin at /c/snapshot.js. Without JS the invitation button still works."""
     snap = build_snapshot(db, post_id, _public_base(request))
+    if request.method == "GET":  # patch_funnel: a person, or a chat app unfurling the link — counted apart, nothing else kept
+        funnel_count(db, "share_preview" if is_preview_bot(request.headers.get("user-agent")) else "share_view")
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])

@@ -35,6 +35,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from db import get_db
+from funnel import count as funnel_count  # patch_funnel
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -303,6 +304,7 @@ def invites_issue(body: IssueIn, db: Session = Depends(get_db)):
         {"h": h, "s": sponsor, "a": str(amount_wei), "c": _now(), "e": expires, "tx": tx, "p": body.post_id})
     db.commit()
     _tx_log(db, tx, sponsor, "invite_escrow", amount)
+    funnel_count(db, "invite_issued")  # patch_funnel
     return {"code": code, "code_hash": h, "amount_vsp": _vsp(amount_wei), "expires_at": _iso(expires), "escrow_tx": tx,
             "sponsor": sponsor, "post_id": body.post_id}
 
@@ -351,6 +353,7 @@ def invites_redeem(body: RedeemIn, db: Session = Depends(get_db)):
     db.execute(sql_text("UPDATE invite_code SET redeem_tx = :tx WHERE code_hash = :h"), {"tx": tx, "h": h})
     db.commit()
     _tx_log(db, tx, addr, "invite_redeem", Decimal(int(row["amount_wei"])) / WEI)
+    funnel_count(db, "invite_redeemed")  # patch_funnel
     return {"amount_vsp": row["amount_vsp"], "tx_hash": tx, "status": "redeemed"}
 
 
