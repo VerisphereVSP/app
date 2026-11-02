@@ -287,8 +287,14 @@ class TestOpinions:
         assert 'START = "&start=1"' in js and js.count("+ START + codeSuffix") == 2  # patch_share_start: every reader, code or not
         assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
 
+    def test_the_rule_is_on_the_page_before_any_side_is_taken(self, client):  # patch_payoff
+        h = client.get("/c/142").text
+        assert f'<p class="rule">{snapshot.THE_RULE}</p>' in h
+        assert h.index('class="rule"') < h.index('data-side="support"')  # above the buttons, not behind a tap
+        assert snapshot.THE_RULE == "Claims settle every day: the side the score favours gains VSP, the other side loses it. Right and early gains the most."
+
     def test_explainer_wording(self):
-        words = " ".join(snapshot.HOW_IT_WORKS).lower()
+        words = " ".join(snapshot.HOW_IT_WORKS + (snapshot.THE_RULE,)).lower()
         for banned in ("true", "false", "price", "value", "invest", "profit", "return"):
             assert banned not in words, banned
         assert len(snapshot.HOW_IT_WORKS) == 3
