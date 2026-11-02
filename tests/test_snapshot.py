@@ -82,10 +82,12 @@ class TestSnapshotJson:
         assert d["app_url"] == "https://app.verisphere.co/claims?post=142"
         # patch_snapshot_invite: the text form leads with the invitation question, quotes the claim, states the
         # standing, and ends with the call + link
-        # patch_share_chat_text: three lines — question + quote, standing + call, the link alone last
-        assert d["share_text"] == ("“Regular coffee consumption is associated with a lower risk of stroke.”\n"
-                                   "72 % of stake on Verisphere backs it. Agree? Support it. Disagree? Challenge it.\nhttps://app.verisphere.co/c/142")
+        # patch_share_preview: four lines — the standing leads, then the quote, the question, the link alone last
+        assert d["share_text"] == ("72 % of stake on Verisphere backs it:\n“Regular coffee consumption is associated with a lower risk of stroke.”\n"
+                                   "Agree? Support it. Disagree? Challenge it.\nhttps://app.verisphere.co/c/142")
+        assert d["standing"] == "72 % of stake on Verisphere backs it"
         assert d["card_jpg_url"] == "https://app.verisphere.co/api/claims/142/card.jpg"
+        assert d["preview_url"] == "https://app.verisphere.co/api/claims/142/preview.jpg"
         assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it." and d["invite_call"] == "Take a side"
         assert d["invite_line"] == "Agree? Support it. Disagree? Challenge it. app.verisphere.co/c/142"
         assert d["next_settlement_at"].endswith("T00:00:00Z")
@@ -94,13 +96,13 @@ class TestSnapshotJson:
         d = client.get("/api/claims/17/snapshot").json()
         assert d["band"] == "Strongly challenged" and d["stake_line"] == "80 % of stake challenges this claim"
         assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it."  # symmetric, whatever the standing
-        assert "\n80 % of stake on Verisphere challenges it. Agree? Support it. Disagree? Challenge it.\n" in d["share_text"]
+        assert d["share_text"].startswith("80 % of stake on Verisphere challenges it:\n“")
 
     def test_no_stake_and_no_verdict_words(self, client):
         d = client.get("/api/claims/5/snapshot").json()
         assert d["stake_line"] == "No stake yet" and d["band"] == "Contested"
         assert d["invite_question"] == "No one has taken a side yet." and d["invite_call"] == "Be the first"
-        assert "\nNo stake on Verisphere so far. No one has taken a side yet.\n" in d["share_text"]
+        assert d["share_text"].startswith("No stake on Verisphere so far:\n“") and "\nNo one has taken a side yet.\n" in d["share_text"]
         for pid in (5, 17, 142):
             d = client.get(f"/api/claims/{pid}/snapshot").json()
             words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text", "invite_line")).lower()
@@ -140,6 +142,26 @@ class TestCard:
         im = Image.open(io.BytesIO(r.content))
         assert im.format == "JPEG" and im.size == (1200, 630) and len(r.content) < 300_000
         assert client.head("/api/claims/142/card.jpg").status_code == 200
+
+    def test_preview_image_is_the_score_inside_the_square(self, client):  # patch_share_preview
+        from PIL import Image
+        import io
+        r = client.get("/api/claims/17/preview.jpg")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+        im = Image.open(io.BytesIO(r.content)).convert("RGB")
+        assert im.size == (1200, 630) and len(r.content) < 300_000
+        assert client.head("/api/claims/17/preview.jpg").status_code == 200
+        # the tile is red (VS −73) and sits in the middle; the stake bar is mostly red (80 % challenge) and inside the square
+        r_, g_, b_ = im.getpixel((600, 150))
+        assert r_ > 180 and g_ < 90 and b_ < 90
+        bar_red = sum(1 for x in range(320, 880, 8) if (lambda p: p[0] > 180 and p[1] < 90)(im.getpixel((x, 385))))
+        bar_green = sum(1 for x in range(320, 880, 8) if (lambda p: p[1] > 120 and p[0] < 90)(im.getpixel((x, 385))))
+        assert bar_red > bar_green * 3 and bar_green > 0
+        # nothing but white and the border outside the central 630×630 square below the header: a square crop loses nothing
+        for region in (im.crop((4, 110, 285, 626)), im.crop((915, 110, 1196, 626))):
+            assert all(sum(p) > 600 for p in region.getdata())
+        # and the full card still carries the quote while the preview does not: different images
+        assert client.get("/api/claims/17/card.jpg").content != r.content
 
     def test_fit_keeps_44px_for_short_and_shrinks_long_without_cutting(self):
         from PIL import Image, ImageDraw
@@ -181,8 +203,9 @@ class TestSharePage:
         r = client.get("/c/142", headers={"x-forwarded-proto": "https", "x-forwarded-host": "app.verisphere.co"})
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         h = r.text
-        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/card.jpg">' in h  # patch_share_chat_text
-        assert '<meta property="og:image:type" content="image/jpeg">' in h and 'twitter:image" content="https://app.verisphere.co/api/claims/142/card.jpg"' in h
+        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/preview.jpg">' in h  # patch_share_preview
+        assert '<meta property="og:image:type" content="image/jpeg">' in h and 'twitter:image" content="https://app.verisphere.co/api/claims/142/preview.jpg"' in h
+        assert '<img src="https://app.verisphere.co/api/claims/142/card.png"' in h  # the page itself shows the full card
         assert '<img src="https://app.verisphere.co/api/claims/142/card.png"' in h  # the page itself keeps the PNG
         assert '<meta name="twitter:card" content="summary_large_image">' in h
         assert 'og:title" content="Regular coffee consumption' in h

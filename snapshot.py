@@ -142,7 +142,9 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
                 else "no stake on Verisphere so far")
     # patch_share_chat_text: three short lines — the preview card already shows the band and the stake, and chat apps
     # unfurl a link best when it stands alone on the last line
-    share_text = f"\u201c{text}\u201d\n{standing[0].upper()}{standing[1:]}. {question}\n{share_url}"
+    standing_cap = f"{standing[0].upper()}{standing[1:]}"
+    # patch_share_preview (Lavey 11-02): the standing leads — it is the one thing a preview's title cannot show
+    share_text = f"{standing_cap}:\n\u201c{text}\u201d\n{question}\n{share_url}"
     return {
         "post_id": post_id,
         "text": text,
@@ -159,7 +161,9 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
         "next_settlement_at": next_settlement(now).isoformat().replace("+00:00", "Z"),
         "share_url": share_url,
         "card_url": f"{base}/api/claims/{post_id}/card.png",
-        "card_jpg_url": f"{base}/api/claims/{post_id}/card.jpg",  # patch_share_chat_text: what link previews point at
+        "card_jpg_url": f"{base}/api/claims/{post_id}/card.jpg",  # patch_share_chat_text: the full card as JPEG
+        "preview_url": f"{base}/api/claims/{post_id}/preview.jpg",  # patch_share_preview: what link previews point at
+        "standing": standing_cap,
         "app_url": f"{base}/claims?post={post_id}",
         "invite_question": question,
         "invite_call": call,
@@ -298,6 +302,88 @@ def render_card(snap: dict) -> bytes:
     return out.getvalue()
 
 
+def render_preview(snap: dict) -> bytes:
+    """patch_share_preview — the image behind og:image / twitter:image. Previews print the page title (the claim text)
+    beside a centre-cropped square of the image, so this one carries what the title cannot: the score. Everything that
+    matters sits inside the central 630×630 square — the VS tile, the band, the stake bar and the standing — with no
+    quote; the full card (render_card) keeps the quote for Copy image and the share sheet."""
+    from PIL import Image, ImageDraw, ImageChops
+    img = Image.new("RGB", (CARD_W, CARD_H), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, CARD_W - 1, CARD_H - 1], radius=24, outline=CARD_BORDER, width=2)
+    cx = CARD_W // 2
+    # header, centred so the square crop keeps the wordmark whole; the claim number sits at the right edge (context)
+    f30 = _font(30)
+    wm_w = 48 + 14 + d.textlength("Verisphere", font=f30)
+    x, y = int(cx - wm_w / 2), 40
+    if _LOGO.exists():
+        try:
+            logo = Image.open(_LOGO).convert("RGBA").resize((48, 48), Image.LANCZOS)
+            img.paste(logo, (x, y), logo)
+        except Exception:
+            pass
+    d.text((x + 48 + 14, y + 4), "Verisphere", font=f30, fill=INK)
+    right = f"claim #{snap['post_id']}"
+    f18 = _font(18, bold=False)
+    d.text((CARD_W - 56 - d.textlength(right, font=f18), y + 14), right, font=f18, fill=SUBTLE)
+    # the VS tile, large and centred
+    vs = float(snap["verity_score"])
+    pw, ph = 360, 150
+    px, py = cx - pw // 2, 120
+    d.rounded_rectangle([px, py, px + pw, py + ph], radius=14, fill=PILL_BG, outline=PILL_BORDER, width=2)
+    fill_w = int(pw * max(abs(vs), 2) / 100)
+    fill_col = GREEN if vs > 0 else RED if vs < 0 else GRAY_FILL
+    d.rounded_rectangle([px, py, px + fill_w, py + ph], radius=14, fill=fill_col)
+    if fill_w < pw - 14:
+        d.rectangle([px + fill_w - 14, py, px + fill_w, py + ph], fill=fill_col)
+    label = f"{vs:+.0f}"
+    f_big = _font(96)
+    tw = d.textlength(label, font=f_big)
+    tx, ty = px + (pw - tw) / 2, py + (ph - f_big.size) / 2 - 14
+    for colour, box in (((0x11, 0x18, 0x27), [px + fill_w, py, px + pw, py + ph]), ((255, 255, 255), [px, py, px + fill_w, py + ph])):
+        layer = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((tx, ty), label, font=f_big, fill=colour + (255,))
+        region = Image.new("L", (CARD_W, CARD_H), 0)
+        ImageDraw.Draw(region).rectangle(box, fill=255)
+        img.paste(layer, (0, 0), ImageChops.multiply(layer.split()[3], region))
+    # the band
+    band_col = GREEN_TEXT if snap["band_role"] == "support" else RED_TEXT if snap["band_role"] == "challenge" else MUTED
+    f_band = _font(46)
+    d.text((cx - d.textlength(snap["band"], font=f_band) / 2, 292), snap["band"], font=f_band, fill=band_col)
+    # the stake bar: support share in green from the left, challenge share in red from the right; grey when no stake
+    bw, bh, by = 560, 26, 372
+    bx = cx - bw // 2
+    pct = snap["support_pct"]
+    d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=13, fill=GRAY_FILL)
+    if pct is not None:
+        sw = int(bw * pct / 100)
+        if sw > 0:
+            d.rounded_rectangle([bx, by, bx + sw, by + bh], radius=13, fill=GREEN)
+            if sw < bw - 13:
+                d.rectangle([bx + max(sw - 13, 0), by, bx + sw, by + bh], fill=GREEN)
+        if sw < bw:
+            d.rounded_rectangle([bx + sw, by, bx + bw, by + bh], radius=13, fill=RED)
+            if sw > 13:
+                d.rectangle([bx + sw, by, bx + sw + 13, by + bh], fill=RED)
+    # the standing on its own line (it must fit the central square), the total beneath it
+    f26 = _font(26, bold=False)
+    d.text((cx - d.textlength(snap["standing"], font=f26) / 2, by + bh + 16), snap["standing"], font=f26, fill=MUTED)
+    if snap["support_pct"] is not None:
+        total = f"{snap['total_stake']:,.0f} VSP staked" if snap["total_stake"] >= 1 else f"{snap['total_stake']:.2f} VSP staked"
+        f22 = _font(22, bold=False)
+        d.text((cx - d.textlength(total, font=f22) / 2, by + bh + 54), total, font=f22, fill=SUBTLE)
+    # the invitation, centred at the bottom; url in violet beneath
+    f24 = _font(24)
+    q = snap["invite_question"]
+    d.text((cx - d.textlength(q, font=f24) / 2, CARD_H - 40 - 60), q, font=f24, fill=INK)
+    url = snap["share_url"].replace("https://", "").replace("http://", "")
+    f20 = _font(20, bold=False)
+    d.text((cx - d.textlength(url, font=f20) / 2, CARD_H - 40 - 24), url, font=f20, fill=VIOLET_DEEP)
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def to_jpeg(png: bytes, quality: int = 86) -> bytes:
     """patch_share_chat_text: the same card as a JPEG (~50 KB). WhatsApp and some other chat apps show the large preview
     reliably for a JPEG under ~300 KB and fall back to a small square for a PNG; the PNG stays for Copy image."""
@@ -316,7 +402,7 @@ def _cached_card(db: Session, post_id: int, base: str, fmt: str = "png") -> byte
         if hit and now - hit[0] < CARD_TTL_SEC:
             return hit[1]
     snap = build_snapshot(db, post_id, base)
-    data = render_card(snap)
+    data = to_jpeg(render_preview(snap)) if fmt == "preview" else render_card(snap)  # patch_share_preview
     if fmt == "jpg":
         data = to_jpeg(data)
     with _card_lock:
@@ -412,8 +498,16 @@ def claim_card(post_id: int, request: Request, db: Session = Depends(get_db)):
 
 @router.api_route("/api/claims/{post_id}/card.jpg", methods=["GET", "HEAD"])
 def claim_card_jpg(post_id: int, request: Request, db: Session = Depends(get_db)):
-    """patch_share_chat_text: the preview image for link unfurls (see to_jpeg)."""
+    """patch_share_chat_text: the full card as JPEG (see to_jpeg)."""
     jpg = _cached_card(db, post_id, _public_base(request), "jpg")
+    return Response(content=jpg, media_type="image/jpeg",
+                    headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
+
+
+@router.api_route("/api/claims/{post_id}/preview.jpg", methods=["GET", "HEAD"])
+def claim_preview_jpg(post_id: int, request: Request, db: Session = Depends(get_db)):
+    """patch_share_preview: the image behind og:image — the score, square-crop safe, no quote (see render_preview)."""
+    jpg = _cached_card(db, post_id, _public_base(request), "preview")
     return Response(content=jpg, media_type="image/jpeg",
                     headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
 
@@ -429,7 +523,7 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])
-    preview = escape(snap["card_jpg_url"])  # patch_share_chat_text: previews get the JPEG; the page shows the PNG
+    preview = escape(snap["preview_url"])  # patch_share_preview: previews get the score image; the page shows the full card
     question = escape(snap["invite_question"]); call = escape(snap["invite_call"])  # patch_snapshot_invite
     pct = "" if snap["support_pct"] is None else str(snap["support_pct"])
     how = "".join(f"<li>{escape(line)}</li>" for line in HOW_IT_WORKS)
