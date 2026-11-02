@@ -102,6 +102,23 @@ def _tokens(text: str) -> List[str]:
 
 # ── Stage 1: candidates ────────────────────────────────────────────
 
+CHECK_CANDIDATE_LIMIT = _env_int("VSP_LOCATE_CHECK_LIMIT", 3000)
+
+
+def _all_claims(db: Session) -> List[Tuple[int, str]]:
+    """patch_locate_check — the whole corpus as candidates: a reader checked ONE sentence from any page, so there
+    are no page phrases to narrow by and a paraphrase must still be found. Bounded; newest first."""
+    try:
+        rows = db.execute(sql_text("""
+            SELECT post_id, claim_text FROM chain_claim_text
+             WHERE claim_text IS NOT NULL ORDER BY post_id DESC LIMIT :lim
+        """), {"lim": CHECK_CANDIDATE_LIMIT}).fetchall()
+    except Exception as e:
+        logger.warning("locate: corpus lookup failed: %s", e)
+        return []
+    return [(int(r[0]), r[1] or "") for r in rows]
+
+
 def _candidate_claims(db: Session, phrases: List[str]) -> List[Tuple[int, str]]:
     """Claims whose text full-text matches any page phrase, best-ranked first."""
     cleaned: List[str] = []
@@ -322,7 +339,10 @@ def locate_claims(
     if not sentences:
         return {"groups": [], "fluff": []}
 
-    candidates = _candidate_claims(db, list(raw_phrases) + _tokens(title))
+    # patch_locate_check: {check: true} with a single sentence (the extension's "Check on Verisphere" on any page)
+    # widens the candidates to the whole corpus; the lexical + vector stages then do the real matching.
+    check_mode = bool(body.get("check")) and len(sentences) == 1
+    candidates = _all_claims(db) if check_mode else _candidate_claims(db, list(raw_phrases) + _tokens(title))
     if not candidates:
         return {"groups": [], "fluff": []}
 
