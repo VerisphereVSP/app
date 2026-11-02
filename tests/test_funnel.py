@@ -64,12 +64,12 @@ def rows(SessionLocal):
 class TestCounts:
     def test_browser_steps_count_and_the_rest_are_refused(self, harness):
         S, c = harness
-        for step in ("start_open", "start_open", "start_wallet", "start_skip", "back_tap"):
+        for step in ("start_open", "start_open", "start_wallet", "start_skip", "back_tap", "ext_install_tap"):
             assert c.post("/api/funnel", json={"step": step}).status_code == 204
-        assert rows(S) == {"start_open": 2, "start_wallet": 1, "start_skip": 1, "back_tap": 1}
+        assert rows(S) == {"start_open": 2, "start_wallet": 1, "start_skip": 1, "back_tap": 1, "ext_install_tap": 1}
         for bad in ("share_view", "invite_redeemed", "side_taken", "nonsense", ""):  # server-side steps cannot be posted
             assert c.post("/api/funnel", json={"step": bad}).status_code == 400
-        assert rows(S) == {"start_open": 2, "start_wallet": 1, "start_skip": 1, "back_tap": 1}
+        assert rows(S) == {"start_open": 2, "start_wallet": 1, "start_skip": 1, "back_tap": 1, "ext_install_tap": 1}
 
     def test_share_page_counts_people_and_previews_apart(self, harness):
         S, c = harness

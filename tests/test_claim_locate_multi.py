@@ -67,3 +67,23 @@ def test_merge_takes_the_more_confident_score_and_unions_the_stages():
     assert out[1] == [(104, 0.9)]
     assert out[2] == [(105, 0.81)]
     assert cl._merge_matches({0: [(1, 0.9), (2, 0.8), (3, 0.7)]}, {}, limit=2)[0] == [(1, 0.9), (2, 0.8)]
+
+
+# patch_locate_check — "Check on Verisphere" from any page: one sentence, no page phrases, the whole corpus as candidates.
+def test_check_mode_uses_the_corpus_not_the_page_phrases(monkeypatch):
+    calls = {"all": 0, "phr": 0}
+    corpus = [(101, "Climate change threatens people with increased flooding."), (104, "The Paris Agreement was adopted in 2015.")]
+    monkeypatch.setattr(cl, "_all_claims", lambda db: calls.__setitem__("all", calls["all"] + 1) or corpus)
+    monkeypatch.setattr(cl, "_candidate_claims", lambda db, phrases: calls.__setitem__("phr", calls["phr"] + 1) or [])
+    monkeypatch.setattr(cl, "_vector_matches", lambda db, texts, pids: {})
+    monkeypatch.setattr(cl, "_summary", lambda db, pid: {"post_id": pid, "text": dict(corpus)[pid], "verity_score": 10.0, "is_active": True, "total_stake": 3.0})
+    body = {"title": "Some blog post", "url": "https://example.org/x", "phrases": [], "check": True,
+            "sentences": [{"sentenceId": "check-1", "text": "Climate change threatens people with increased flooding."}]}
+    out = cl.locate_claims(body, None, db=None)
+    assert calls == {"all": 1, "phr": 0}
+    assert [g["claim"]["post_id"] for g in out["groups"]] == [101] and out["groups"][0]["sentence_ids"] == ["check-1"]
+    # without the flag (or with several sentences) the page-phrase path is taken as before
+    calls.update(all=0, phr=0)
+    cl.locate_claims({**body, "check": False}, None, db=None)
+    cl.locate_claims({**body, "sentences": body["sentences"] * 2}, None, db=None)
+    assert calls == {"all": 0, "phr": 2}

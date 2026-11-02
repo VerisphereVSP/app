@@ -46,8 +46,9 @@ STEPS: tuple[str, ...] = (
     "start_skip",      # left the sheet before staking
     "invite_issued",
     "invite_redeemed",
+    "ext_install_tap",  # patch_locate_check (0.1.4): the app's "Install the extension" button was tapped
 )
-BROWSER_STEPS = frozenset({"back_tap", "start_open", "start_wallet", "start_funded", "start_staked", "start_skip"})
+BROWSER_STEPS = frozenset({"back_tap", "start_open", "start_wallet", "start_funded", "start_staked", "start_skip", "ext_install_tap"})
 PREVIEW_BOTS = ("whatsapp", "facebookexternalhit", "facebot", "twitterbot", "slackbot", "telegrambot", "discordbot",
                 "linkedinbot", "skypeuripreview", "signal", "imessage", "googlebot", "bingbot", "applebot", "viber")
 
