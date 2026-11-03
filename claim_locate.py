@@ -94,6 +94,40 @@ _STOPWORDS: Set[str] = set(
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
+# ── patch_locate_anchors: a sentence that leans on its page is matched with the page's anchors ─────────
+# "It was first identified in December 2019" on the COVID-19 article has no "covid" in it; the claim does. For sentences
+# that dangle (a leading pronoun, a bare "the market" with no proper noun, relative time), the page's own anchors — the
+# title and its proper-noun phrases — are added: to the token set for the lexical stage, and in brackets after the text
+# for the embedding. Self-contained sentences are matched as they are, so the anchors never pull in a claim the sentence
+# does not state on its own.
+MAX_ANCHORS = 6
+
+
+def page_anchors(title: str, phrases: List[Any]) -> List[str]:
+    """Short proper-noun phrases from the page title and its phrases, best first, bounded."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    cleaned_title = re.sub(r"\s+[-–—|]\s+Wikipedia.*$", "", title or "").strip()
+    for p in [cleaned_title] + [x for x in phrases if isinstance(x, str)]:
+        p = re.sub(r"\s+", " ", p).strip()
+        if not (3 <= len(p) <= 60) or not re.search(r"[A-Z0-9]", p) or p.lower() in seen:
+            continue
+        seen.add(p.lower())
+        out.append(p)
+        if len(out) >= MAX_ANCHORS:
+            break
+    return out
+
+
+def leans_on_page(text: str) -> bool:
+    """True when the sentence points outside itself (the same floor the resolver uses)."""
+    try:
+        from claim_resolve import dangling_references
+        return bool(dangling_references(text))
+    except Exception:
+        return False
+
+
 def _tokens(text: str) -> List[str]:
     """Significant lowercase word tokens: 3+ chars, stopwords dropped."""
     return [w for w in _WORD_RE.findall((text or "").lower())
@@ -350,18 +384,27 @@ def locate_claims(
     # are worth embedding. This is what bounds the embedding cost per request.
     cand_tokens: List[Tuple[int, List[str]]] = [(pid, _tokens(t)) for pid, t in candidates]
     vocabulary: Set[str] = {tk for _, toks in cand_tokens for tk in toks}
+    anchors = page_anchors(title, list(raw_phrases))
+    anchor_tokens: Set[str] = set(_tokens(" ".join(anchors))) if anchors else set()
     kept: List[Tuple[str, str]] = []
     kept_tokens: List[Set[str]] = []
+    embed_texts: List[str] = []
+    anchored = 0
     for sid, text in sentences:
         toks = set(_tokens(text))
+        lean = bool(anchor_tokens) and leans_on_page(text)
+        if lean:
+            toks = toks | anchor_tokens  # patch_locate_anchors
         if toks & vocabulary:
             kept.append((sid, text))
             kept_tokens.append(toks)
+            embed_texts.append(f"{text} [{'; '.join(anchors)}]" if lean else text)
+            anchored += int(lean)
     if not kept:
         return {"groups": [], "fluff": []}
 
     lexical = _lexical_matches(kept_tokens, cand_tokens)
-    vector = _vector_matches(db, [t for _, t in kept], [pid for pid, _ in candidates])
+    vector = _vector_matches(db, embed_texts, [pid for pid, _ in candidates])
 
     # Every claim a sentence states, each at its more confident score; a
     # sentence stating several claims lands in each of their groups.
@@ -396,4 +439,4 @@ def locate_claims(
         title or "?", len(sentences), len(candidates), len(kept), len(groups),
         len(lexical), len(vector),
     )
-    return {"groups": groups, "fluff": []}
+    return {"groups": groups, "fluff": [], "anchored": anchored}  # patch_locate_anchors: how many sentences leaned on the page
