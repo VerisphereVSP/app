@@ -87,3 +87,33 @@ def test_check_mode_uses_the_corpus_not_the_page_phrases(monkeypatch):
     cl.locate_claims({**body, "check": False}, None, db=None)
     cl.locate_claims({**body, "sentences": body["sentences"] * 2}, None, db=None)
     assert calls == {"all": 0, "phr": 2}
+
+
+# patch_locate_anchors — a sentence that leans on its page is matched with the page's anchors
+def test_page_anchors_are_short_proper_noun_phrases_from_title_and_phrases():
+    a = cl.page_anchors("COVID-19 pandemic - Wikipedia", ["Wuhan", "wuhan", "Huanan Seafood Wholesale Market", "x", "a lowercase phrase", "A" * 80, "Severe acute respiratory syndrome coronavirus 2"])
+    assert a[0] == "COVID-19 pandemic" and "Wuhan" in a and "Huanan Seafood Wholesale Market" in a
+    assert "x" not in a and "a lowercase phrase" not in a and not any(len(x) > 60 for x in a) and len(a) <= cl.MAX_ANCHORS
+    assert cl.page_anchors("", []) == []
+
+
+def test_a_dangling_sentence_matches_through_the_page_anchors_a_self_contained_one_does_not(monkeypatch):
+    corpus = [(101, "COVID-19 was first identified in Wuhan in December 2019."), (104, "The Paris Agreement was adopted in 2015.")]
+    monkeypatch.setattr(cl, "_candidate_claims", lambda db, phrases: corpus)
+    embedded = {}
+    monkeypatch.setattr(cl, "_vector_matches", lambda db, texts, pids: embedded.update({"texts": list(texts)}) or {})
+    monkeypatch.setattr(cl, "_summary", lambda db, pid: {"post_id": pid, "text": dict(corpus)[pid], "verity_score": 10.0, "is_active": True, "total_stake": 3.0})
+    body = {"title": "COVID-19 pandemic - Wikipedia", "url": "https://en.wikipedia.org/wiki/COVID-19_pandemic", "phrases": ["Wuhan"],
+            "sentences": [{"sentenceId": "s1", "text": "It was first identified in Wuhan in December 2019."},
+                          {"sentenceId": "s2", "text": "The Paris Agreement was adopted in 2015 by 196 parties."}]}
+    out = cl.locate_claims(body, None, db=None)
+    # s1 leans on the page ("It"): the anchors supply "covid-19" and the lexical stage finds claim 101;
+    # s2 stands alone and is matched exactly as written (claim 104), with no anchors added
+    by = {g["claim"]["post_id"]: g["sentence_ids"] for g in out["groups"]}
+    assert by == {101: ["s1"], 104: ["s2"]}
+    assert out["anchored"] == 1
+    assert embedded["texts"][0].startswith("It was first identified in Wuhan in December 2019. [COVID-19 pandemic; Wuhan]")
+    assert embedded["texts"][1] == "The Paris Agreement was adopted in 2015 by 196 parties."
+    # without anchors (no title, no phrases) the same dangling sentence finds nothing
+    out2 = cl.locate_claims({**body, "title": "", "phrases": []}, None, db=None)
+    assert {g["claim"]["post_id"]: g["sentence_ids"] for g in out2["groups"]} == {104: ["s2"]} and out2["anchored"] == 0
