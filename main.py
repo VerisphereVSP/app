@@ -43,6 +43,7 @@ from articles.article_routes import router as article_router
 from semantic_dedup import router as semantic_dedup_router
 from claim_locate import router as claim_locate_router
 from claim_atomicity import router as claim_atomicity_router
+from claim_resolve import router as claim_resolve_router  # patch_claim_resolve
 from relay_gateway import router as relay_gateway_router
 from pool_trade import router as pool_trade_router  # patch_pool_trade: buy/sell VSP with AVAX or USDC
 from snapshot import router as snapshot_router  # patch_verisnap_share: claim snapshot JSON, card PNG, /c/<id> share page
@@ -214,6 +215,7 @@ app.include_router(semantic_dedup_router)
 # config + calldata.
 app.include_router(claim_locate_router)
 app.include_router(claim_atomicity_router)
+app.include_router(claim_resolve_router)  # patch_claim_resolve: a claim must stand alone before it goes on chain
 app.include_router(relay_gateway_router)
 app.include_router(pool_trade_router)  # patch_pool_trade
 app.include_router(snapshot_router)  # patch_verisnap_share
