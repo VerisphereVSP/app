@@ -42,6 +42,7 @@ class EditRequest(BaseModel):
 class CleanupRequest(BaseModel):
     text: str
     topic: str = ""
+    paragraph: str = ""  # patch_claim_resolve: the sentences around it, when the caller has them
 
 class RegisterRequest(BaseModel):
     """Empty — just triggers on-chain registration."""
@@ -743,11 +744,17 @@ def link_post_endpoint(sentence_id: int, req: LinkPostRequest,
 @ai_rate_limit
 def cleanup_sentence_endpoint(req: CleanupRequest, request: Request):
     # M5: see generate_article_endpoint.
-    """AI grammar/spelling cleanup. Returns original + suggested."""
+    """AI grammar/spelling cleanup, then the stand-alone check (patch_claim_resolve): the suggestion is resolved
+    against the topic and paragraph, and the reply says whether it still depends on context the claim does not carry.
+    Returns original, suggested, needs_context, reason, changes."""
     from articles.article_gen import cleanup_sentence
+    from claim_resolve import resolve_claim
     original = req.text.strip()
     suggested = cleanup_sentence(original, topic=req.topic)
-    return {"original": original, "suggested": suggested}
+    ctx = {k: v for k, v in (("topic", req.topic), ("paragraph", req.paragraph)) if v and v.strip()}
+    res = resolve_claim(suggested, ctx)
+    return {"original": original, "suggested": res["resolved"], "needs_context": res["needs_context"],
+            "reason": res["reason"], "changes": res["changes"], "dangling": res["dangling"]}
 
 
 @router.get("/disambiguate")
