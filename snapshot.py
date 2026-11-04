@@ -55,11 +55,12 @@ _SCRIPT = Path(__file__).resolve().parent / "assets" / "snapshot.js"  # patch_sh
 # Facts about the game, never a verdict; nothing about price or value (the wording test sweeps these).
 # patch_payoff — the one sentence a stranger needs before anything else (Lavey, 11-01, framing "A"): the same words on the
 # share page above the buttons, in the app's Start sheet and at the top of the guide.
-THE_RULE = "Claims settle every day: the side the score favours gains VSP, the other side loses it. Right and early gains the most."
+THE_RULE = ("The score is a credibility signal, not a verdict and not a bet: it is what people are willing to stake behind each side. "
+            "Positions earn or lose VSP over time by the claim's score — from the protocol, never from the other side.")  # patch_not_a_bet
 
 HOW_IT_WORKS = (
     "Verisphere is a game of claims: people stake VSP to support or challenge them, and the stake behind each side is the score you see.",
-    "Every day at 00:00 UTC each claim settles: the side the score (the stake plus its linked evidence) favours gains VSP, the other side loses it. Earlier stakers on a side gain more.",
+    "Positions earn or lose VSP over time at a rate set by the claim's score (the stake plus its linked evidence), paid by and to the protocol — nothing moves between sides, and nothing is ever resolved. Earlier stakers on a side earn more.",
     "Taking a side here costs nothing and counts for nothing in the game. Backing it with VSP is what moves the score.",
 )
 
@@ -566,7 +567,7 @@ small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></hea
 <a class="btn" id="ts-back" href="{app_url}" hidden>Back it with VSP</a>
 </section>
 <noscript><h2>{question}</h2><a class="btn" href="{app_url}">{call} on Verisphere</a></noscript>
-<p>The score on the card is the stake behind each side right now, not a verdict; it changes as people stake. Taking a side here is anonymous: nothing about you is stored, only a daily count per side.</p>
+<p>Use the score to notice when something you read is contested — or unsupported. It is the stake behind each side right now, not a verdict; it changes as people stake. Taking a side here is anonymous: nothing about you is stored, only a daily count per side.</p>
 <small>Claim #{post_id} · <a href="{app_url}">open it on Verisphere</a></small>
 </main><script src="/c/snapshot.js" defer></script></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
