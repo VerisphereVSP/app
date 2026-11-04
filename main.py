@@ -223,6 +223,8 @@ from invites import router as invites_router  # patch_invites
 app.include_router(invites_router)  # patch_invites
 from funnel import router as funnel_router  # patch_funnel
 app.include_router(funnel_router)  # patch_funnel
+from activity import router as activity_router  # patch_activity
+app.include_router(activity_router)  # patch_activity: what happened on your claims
 
 ADDRESSES_PATH = Path(f"/app/broadcast/Deploy.s.sol/{CHAIN_ID}/addresses.json")
 
