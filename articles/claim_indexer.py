@@ -528,6 +528,85 @@ def index_existing_claims_into_article(db: Session, article_id: int):
     logger.info("unified inject: article %d — injected %d claims, hid %d sentences",
                 article_id, indexed_count, len(hide_ids))
 
+    # patch_article_orphans: a sentence whose text IS an on-chain claim must never be shown as prose. The reset above
+    # clears every post_id and Stage A re-attaches only this topic's claims, so a claim created from inside this
+    # article but filed under another topic (post 13, typed in Climate Change, filed under Economic Systems) came back
+    # as an unlinked sentence with a "make this a claim" prompt. Settle those: attach when the claim is this topic's or
+    # relevant here, hide otherwise (it is shown in its own topic's article).
+    try:
+        settle_orphan_claim_sentences(db, article_id)
+    except Exception as e:
+        logger.warning("settle orphans failed for article %d: %s", article_id, e)
+
+
+def _norm_text(t: str) -> str:
+    return " ".join((t or "").split()).lower()
+
+
+def settle_orphan_claim_sentences(db: Session, article_id: int, *, article_vec=None) -> dict:
+    """patch_article_orphans. For one article: every visible sentence with no post_id whose normalized text equals an
+    on-chain claim's text is either attached to that claim (same topic, or relevant to this article) or hidden (it
+    belongs elsewhere). Returns {"attached": n, "hidden": n}. Never touches sentences that already carry a post_id."""
+    art = db.execute(sql_text("SELECT topic_key FROM topic_article WHERE article_id = :a"), {"a": article_id}).fetchone()
+    if not art:
+        return {"attached": 0, "hidden": 0}
+    topic_key = (art[0] or "").lower().strip()
+    orphans = db.execute(sql_text(
+        "SELECT s.sentence_id, s.text FROM article_sentence s "
+        "JOIN article_section sec ON s.section_id = sec.section_id "
+        "WHERE sec.article_id = :a AND s.post_id IS NULL AND s.is_hidden = FALSE AND s.text IS NOT NULL"
+    ), {"a": article_id}).fetchall()
+    if not orphans:
+        return {"attached": 0, "hidden": 0}
+    # on-chain claims by normalized text, with the topic the claim table filed them under
+    claims = {}
+    for pid, ctext, topic in db.execute(sql_text(
+        "SELECT ct.post_id, ct.claim_text, c.topic FROM chain_claim_text ct "
+        "LEFT JOIN claim c ON c.claim_text = ct.claim_text AND c.post_id IS NOT NULL"
+    )).fetchall():
+        key = _norm_text(ctext)
+        if key and key not in claims:
+            claims[key] = (int(pid), ctext, (topic or "").lower().strip())
+    # a claim already carried by another sentence of this article must not be attached twice
+    carried = {int(r[0]) for r in db.execute(sql_text(
+        "SELECT s.post_id FROM article_sentence s JOIN article_section sec ON s.section_id = sec.section_id "
+        "WHERE sec.article_id = :a AND s.post_id IS NOT NULL"), {"a": article_id}).fetchall()}
+    attached = hidden = 0
+    for sid, stext in orphans:
+        hit = claims.get(_norm_text(stext))
+        if not hit:
+            continue
+        pid, ctext, ctopic = hit
+        if pid in carried:
+            db.execute(sql_text("UPDATE article_sentence SET is_hidden = TRUE WHERE sentence_id = :s"), {"s": sid})
+            hidden += 1
+            continue
+        keep = (ctopic == topic_key) or is_claim_relevant_to_article(db, article_id, ctext, article_vec)
+        if keep:
+            db.execute(sql_text("UPDATE article_sentence SET post_id = :p WHERE sentence_id = :s"), {"p": pid, "s": sid})
+            carried.add(pid)
+            attached += 1
+            logger.info("orphan claim sentence %d attached to post %d in article %d", sid, pid, article_id)
+        else:
+            db.execute(sql_text("UPDATE article_sentence SET is_hidden = TRUE WHERE sentence_id = :s"), {"s": sid})
+            hidden += 1
+            logger.info("orphan claim sentence %d (post %d, topic '%s') hidden in article %d ('%s')", sid, pid, ctopic, article_id, topic_key)
+    db.commit()
+    return {"attached": attached, "hidden": hidden}
+
+
+def repair_orphan_claim_sentences(db: Session) -> dict:
+    """patch_article_orphans: the one-off for data already on disk — settle every article, invalidate the cache of
+    those that changed (cached_response cleared) so the next read serves the settled article and rebuilds the cache. Returns per-article counts for the articles touched."""
+    out = {}
+    for article_id, topic_key in db.execute(sql_text("SELECT article_id, topic_key FROM topic_article")).fetchall():
+        r = settle_orphan_claim_sentences(db, int(article_id))
+        if r["attached"] or r["hidden"]:
+            out[topic_key] = r
+            db.execute(sql_text("UPDATE topic_article SET cached_response = NULL, last_refreshed_at = NULL WHERE article_id = :a"), {"a": article_id})
+            db.commit()
+    return out
+
 
 def cross_index_claim_into_all_articles(db: Session, claim_text: str, post_id: int):
     """Index a single on-chain claim into ALL relevant articles.
