@@ -217,8 +217,9 @@ class TestSharePage:
         assert 'id="ts-back" href="https://app.verisphere.co/claims?post=142" hidden>Back it with VSP</a>' in h
         assert 'Changed your mind? <a href="#" id="ts-switch">' in h  # patch_share_switch
         assert '<div id="ts-invite" class="invite" hidden></div>' in h  # patch_invites
+        from html import escape
         for line in snapshot.HOW_IT_WORKS:
-            assert line in h
+            assert escape(line) in h
         assert "Verisnap" not in h and "Verisphere Snapshot of claim #142" in h  # patch_snapshot_naming
         assert "<noscript><h2>Agree? Support it. Disagree? Challenge it.</h2>" in h and ">Take a side on Verisphere</a>" in h  # no-JS path
         assert ">Take a side on Verisphere</a>" in client.get("/c/17").text
@@ -311,10 +312,13 @@ class TestOpinions:
         assert client.get("/c/142").status_code == 200  # the int route still matches after the script route
 
     def test_the_rule_is_on_the_page_before_any_side_is_taken(self, client):  # patch_payoff
+        from html import escape
         h = client.get("/c/142").text
-        assert f'<p class="rule">{snapshot.THE_RULE}</p>' in h
+        assert f'<p class="rule">{escape(snapshot.THE_RULE)}</p>' in h
         assert h.index('class="rule"') < h.index('data-side="support"')  # above the buttons, not behind a tap
-        assert snapshot.THE_RULE == "Claims settle every day: the side the score favours gains VSP, the other side loses it. Right and early gains the most."
+        assert snapshot.THE_RULE.startswith("The score is a credibility signal, not a verdict and not a bet") and "never from the other side" in snapshot.THE_RULE  # patch_not_a_bet
+        for banned in ("the other side loses it", "Right and early", "settle every day"):
+            assert banned not in snapshot.THE_RULE and banned not in " ".join(snapshot.HOW_IT_WORKS)
 
     def test_explainer_wording(self):
         words = " ".join(snapshot.HOW_IT_WORKS + (snapshot.THE_RULE,)).lower()
