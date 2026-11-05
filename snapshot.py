@@ -144,8 +144,13 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
     # patch_share_chat_text: three short lines — the preview card already shows the band and the stake, and chat apps
     # unfurl a link best when it stands alone on the last line
     standing_cap = f"{standing[0].upper()}{standing[1:]}"
-    # patch_share_preview (Lavey 11-02): the standing leads — it is the one thing a preview's title cannot show
-    share_text = f"{standing_cap}:\n\u201c{text}\u201d\n{question}\n{share_url}"
+    # patch_share_text_order (Lavey 11-05): the quote leads, the standing follows it on the same line, in full
+    # ("backs this claim"), then the question, then the link alone on the last line (chat apps unfurl it best there)
+    standing_claim = (f"{pct} % of stake on Verisphere backs this claim" if pct is not None and role == "support"
+                      else f"{100 - pct} % of stake on Verisphere challenges this claim" if pct is not None and role == "challenge"
+                      else f"stake on Verisphere is split {pct} / {100 - pct} on this claim" if pct is not None
+                      else "no stake on Verisphere on this claim so far")
+    share_text = f"\u201c{text}\u201d \u2014 {standing_claim}.\n{question}\n{share_url}"
     return {
         "post_id": post_id,
         "text": text,

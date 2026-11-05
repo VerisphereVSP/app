@@ -82,8 +82,8 @@ class TestSnapshotJson:
         assert d["app_url"] == "https://app.verisphere.co/claims?post=142"
         # patch_snapshot_invite: the text form leads with the invitation question, quotes the claim, states the
         # standing, and ends with the call + link
-        # patch_share_preview: four lines — the standing leads, then the quote, the question, the link alone last
-        assert d["share_text"] == ("72 % of stake on Verisphere backs it:\n“Regular coffee consumption is associated with a lower risk of stroke.”\n"
+        # patch_share_text_order: the quote leads with the standing after it in full, then the question, the link alone last
+        assert d["share_text"] == ("“Regular coffee consumption is associated with a lower risk of stroke.” — 72 % of stake on Verisphere backs this claim.\n"
                                    "Agree? Support it. Disagree? Challenge it.\nhttps://app.verisphere.co/c/142")
         assert d["standing"] == "72 % of stake on Verisphere backs it"
         assert d["card_jpg_url"] == "https://app.verisphere.co/api/claims/142/card.jpg"
@@ -96,13 +96,13 @@ class TestSnapshotJson:
         d = client.get("/api/claims/17/snapshot").json()
         assert d["band"] == "Strongly challenged" and d["stake_line"] == "80 % of stake challenges this claim"
         assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it."  # symmetric, whatever the standing
-        assert d["share_text"].startswith("80 % of stake on Verisphere challenges it:\n“")
+        assert "” — 80 % of stake on Verisphere challenges this claim.\n" in d["share_text"] and d["share_text"].startswith("“")
 
     def test_no_stake_and_no_verdict_words(self, client):
         d = client.get("/api/claims/5/snapshot").json()
         assert d["stake_line"] == "No stake yet" and d["band"] == "Contested"
         assert d["invite_question"] == "No one has taken a side yet." and d["invite_call"] == "Be the first"
-        assert d["share_text"].startswith("No stake on Verisphere so far:\n“") and "\nNo one has taken a side yet.\n" in d["share_text"]
+        assert d["share_text"].startswith("“") and "” — no stake on Verisphere on this claim so far.\nNo one has taken a side yet.\n" in d["share_text"]
         for pid in (5, 17, 142):
             d = client.get(f"/api/claims/{pid}/snapshot").json()
             words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text", "invite_line")).lower()

@@ -294,6 +294,16 @@ def invites_issue(body: IssueIn, db: Session = Depends(get_db)):
     if open_count(db, sponsor) >= INVITE_MAX_OUTSTANDING:
         raise HTTPException(429, f"You already have {INVITE_MAX_OUTSTANDING} open invitations; revoke or wait for some to be redeemed")
     amount_wei = int(amount * WEI)
+    # patch_invite_balance: say it before any gas is spent. Without this, a sponsor short of VSP got a permit executed
+    # (relay gas) and a transferFrom that reverted on chain (relay gas again), a 60 s wait, and a 502 the browser had
+    # usually given up on — i.e. no message at all.
+    try:
+        held = vsp_balance(sponsor)
+    except Exception as e:
+        logger.warning("invites: balance read failed for %s: %s", sponsor[:10], e)
+        raise HTTPException(503, "Could not read your VSP balance right now; try again in a moment")
+    if held < amount_wei:
+        raise HTTPException(400, f"You hold {_vsp(held)} VSP; the invitation needs {_vsp(amount_wei)}")
     tx = escrow_pull(sponsor, amount_wei, body.permit)
     code = new_code()
     h = code_hash(code)
