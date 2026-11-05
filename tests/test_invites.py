@@ -76,6 +76,7 @@ def chain(monkeypatch):
     monkeypatch.setattr(invites, "vsp_balance", c.vsp_balance)
     monkeypatch.setattr(invites, "escrow_address", lambda: ESCROW)
     monkeypatch.setattr(invites, "_tx_log", lambda *a, **k: None)
+    c.balances[sponsor_account().address.lower()] = 1_000 * 10 ** 18  # patch_invite_balance: a funded sponsor by default
     return c
 
 
@@ -158,6 +159,21 @@ class TestIssue:
         issue(c); issue(c)
         assert c.post("/api/invites", json={"amount_vsp": "1", "expires_days": 30, "permit": permit_for("1")}).status_code == 429
         assert chain.balances[ESCROW] == 4 * 10 ** 18  # the refused one escrowed nothing
+
+    def test_a_sponsor_short_of_vsp_is_told_before_any_gas_is_spent(self, chain, db_and_client):  # patch_invite_balance
+        _, c = db_and_client
+        chain.balances[sponsor_account().address.lower()] = 16_040_000_000_000_000_000  # 16.04 VSP
+        r = c.post("/api/invites", json={"amount_vsp": "20", "expires_days": 30, "permit": permit_for("20")})
+        assert r.status_code == 400 and r.json()["detail"] == "You hold 16.04 VSP; the invitation needs 20"
+        assert chain.pulls == []  # no permit, no transfer
+        assert issue(c, "16", 30)["amount_vsp"] == "16"  # exactly affordable goes through
+
+    def test_balance_read_failure_refuses_rather_than_burning_gas(self, chain, db_and_client, monkeypatch):  # patch_invite_balance
+        _, c = db_and_client
+        def down(_a): raise RuntimeError("rpc down")
+        monkeypatch.setattr(invites, "vsp_balance", down)
+        r = c.post("/api/invites", json={"amount_vsp": "1", "expires_days": 30, "permit": permit_for("1")})
+        assert r.status_code == 503 and chain.pulls == []
 
     def test_permit_must_name_the_escrow(self, chain, db_and_client):
         _, c = db_and_client
