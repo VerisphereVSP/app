@@ -114,7 +114,7 @@ class TestReport:
         assert d["totals"]["share_preview"] == 0 and d["totals"]["invite_redeemed"] == 0  # every step present, zero or not
         assert len(d["by_day"]) == 1 and d["by_day"][0]["share_view"] == 4 and d["by_day"][0]["start_skip"] == 0
         assert d["conversion"] == {"view_to_side": 0.5, "side_to_back": 0.5, "back_to_open": 1.0, "open_to_wallet": 1.0,
-                                   "wallet_to_funded": 1.0, "funded_to_staked": 1.0, "view_to_staked": 0.25}
+                                   "wallet_to_funded": 1.0, "claim_ok": None, "funded_to_staked": 1.0, "view_to_staked": 0.25}
         assert c.get("/api/funnel?days=0").status_code == 422 and c.get("/api/funnel?days=91").status_code == 422
 
     def test_empty_report_has_null_conversions(self, harness):
@@ -198,3 +198,12 @@ class TestWallets:  # patch_funnel_2
         monkeypatch.setattr(funnel, "_balance", lambda a: None)
         d = c.get("/api/funnel?wallets=1").json()["wallets"]
         assert d == {"sponsored": [], "summary": {"sponsored": 0, "staked": 0, "beyond_invited_claim": 0, "own_vsp": 0}, "new_stakers_by_day": []}
+
+
+def test_start_claim_steps_are_counted_and_the_claim_ratio_reported(harness):  # patch_start_claim
+    S, c = harness
+    for step in ("start_claim_shown", "start_claim_shown", "start_claim_ok", "pending_banner_tap"):
+        assert c.post("/api/funnel", json={"step": step}).status_code == 204
+    j = c.get("/api/funnel?days=1").json()
+    assert j["totals"]["start_claim_shown"] == 2 and j["totals"]["start_claim_ok"] == 1 and j["totals"]["pending_banner_tap"] == 1
+    assert j["conversion"]["claim_ok"] == 0.5

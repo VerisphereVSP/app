@@ -522,7 +522,9 @@ def claim_preview_jpg(post_id: int, request: Request, db: Session = Depends(get_
 def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     """What a pasted link unfurls into — and, since patch_share_interactive, the first move: Support / Challenge without
     a wallet, then three lines on the game and one button into the app. No inline script (the edge CSP allows none);
-    the page's one script is served same-origin at /c/snapshot.js. Without JS the invitation button still works."""
+    the page's one script is served same-origin at /c/snapshot.js. Without JS the invitation button still works.
+    patch_share_open_button (Lavey 11-08): the way into the app is a visible button at the foot of the page, not a
+    footnote link — people who did not take a side still need an obvious door."""
     snap = build_snapshot(db, post_id, _public_base(request))
     if request.method == "GET":  # patch_funnel: a person, or a chat app unfurling the link — counted apart, nothing else kept
         funnel_count(db, "share_preview" if is_preview_bot(request.headers.get("user-agent")) else "share_view")
@@ -547,6 +549,7 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
 <style>body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#F7F5FE;color:#1C1533}}
 main{{max-width:760px;margin:0 auto;padding:24px 16px 48px}}img{{width:100%;height:auto;border-radius:16px;border:1px solid #E4E1F2;background:#fff}}
 a.btn{{display:inline-block;margin-top:16px;padding:14px 22px;border-radius:999px;background:#5B4BC4;color:#fff;text-decoration:none;font-weight:600;font-size:16px}}
+a.btn.ghost{{background:#fff;color:#5B4BC4;border:2px solid #5B4BC4;margin-top:20px}}
 p{{color:#5D5776;font-size:15px;line-height:1.5}}h2{{font-size:22px;margin:24px 0 10px}}
 .sides{{display:flex;gap:10px;margin:0 0 12px}}button.side{{flex:1;padding:14px 10px;border-radius:12px;border:2px solid #E4E1F2;background:#fff;font:600 16px system-ui,sans-serif;cursor:pointer;color:#1C1533}}
 button.side[data-side=support]{{border-color:#16A34A;color:#15803D}}button.side[data-side=challenge]{{border-color:#DC2626;color:#B91C1C}}
@@ -573,6 +576,7 @@ small{{display:block;color:#8A84A6;font-size:12px;margin-top:28px}}</style></hea
 </section>
 <noscript><h2>{question}</h2><a class="btn" href="{app_url}">{call} on Verisphere</a></noscript>
 <p>Use the score to notice when something you read is contested — or unsupported. It is the stake behind each side right now, not a verdict; it changes as people stake. Taking a side here is anonymous: nothing about you is stored, only a daily count per side.</p>
-<small>Claim #{post_id} · <a href="{app_url}">open it on Verisphere</a></small>
+<a class="btn ghost" id="ts-open" href="{app_url}">Open on Verisphere ↗</a>
+<small>Claim #{post_id}</small>
 </main><script src="/c/snapshot.js" defer></script></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": f"public, max-age={CARD_TTL_SEC}"})
