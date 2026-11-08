@@ -47,8 +47,14 @@ STEPS: tuple[str, ...] = (
     "invite_issued",
     "invite_redeemed",
     "ext_install_tap",  # patch_locate_check (0.1.4): the app's "Install the extension" button was tapped
+    # patch_start_claim: the gap three readers fell into — connected a wallet, left the sheet, VSP still on the table
+    "start_claim_shown",   # the sheet had an open invitation and a wallet: the claim was attempted
+    "start_claim_ok",      # the VSP moved
+    "start_claim_fail",    # it did not (shown with a retry)
+    "pending_banner_tap",  # "You have an invitation waiting" was taken up later
 )
-BROWSER_STEPS = frozenset({"back_tap", "start_open", "start_wallet", "start_funded", "start_staked", "start_skip", "ext_install_tap"})
+BROWSER_STEPS = frozenset({"back_tap", "start_open", "start_wallet", "start_funded", "start_staked", "start_skip", "ext_install_tap",
+                           "start_claim_shown", "start_claim_ok", "start_claim_fail", "pending_banner_tap"})
 PREVIEW_BOTS = ("whatsapp", "facebookexternalhit", "facebot", "twitterbot", "slackbot", "telegrambot", "discordbot",
                 "linkedinbot", "skypeuripreview", "signal", "imessage", "googlebot", "bingbot", "applebot", "viber")
 
@@ -178,6 +184,7 @@ def funnel_get(days: int = Query(14, ge=1, le=90), wallets: int = Query(0, ge=0,
             "back_to_open": ratio("start_open", "back_tap"),
             "open_to_wallet": ratio("start_wallet", "start_open"),
             "wallet_to_funded": ratio("start_funded", "start_wallet"),
+            "claim_ok": ratio("start_claim_ok", "start_claim_shown"),  # patch_start_claim: of the claims attempted, how many paid
             "funded_to_staked": ratio("start_staked", "start_funded"),
             "view_to_staked": ratio("start_staked", "share_view"),
         },

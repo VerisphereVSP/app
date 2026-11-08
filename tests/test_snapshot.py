@@ -215,6 +215,9 @@ class TestSharePage:
         assert '<section id="take-side" data-post="142" data-pct="72" data-app="https://app.verisphere.co/claims?post=142">' in h
         assert 'data-side="support">Support</button>' in h and 'data-side="challenge">Challenge</button>' in h
         assert 'id="ts-back" href="https://app.verisphere.co/claims?post=142" hidden>Back it with VSP</a>' in h
+        # patch_share_open_button: an always-visible door into the app, not a footnote link
+        assert '<a class="btn ghost" id="ts-open" href="https://app.verisphere.co/claims?post=142">Open on Verisphere ↗</a>' in h
+        assert "open it on Verisphere" not in h
         assert 'Changed your mind? <a href="#" id="ts-switch">' in h  # patch_share_switch
         assert '<div id="ts-invite" class="invite" hidden></div>' in h  # patch_invites
         from html import escape
