@@ -143,9 +143,11 @@ def _build():
     account = kms_account_from_env("KEEPER")  # asserts KEEPER_KMS_KEY -> KEEPER_ADDRESS
     # treasury-wallet gas policy (fallback=None): if a poke would revert,
     # surface it — never guess a gas limit and broadcast a doomed tx.
+    # patch_tx_fee_headroom: a poke that has no receipt after 120 s is NOT landed — raise,
+    # so the cycle stops instead of stacking more unconfirmed pokes on top of it.
     sign_and_send = make_sign_and_send(
         account=account, w3=w3, receipt_timeout=120, gas_estimate_fallback=None,
-        logger=logger, label="smax_keeper")
+        logger=logger, label="smax_keeper", on_timeout="raise")
     _state.update(built=True, w3=w3, engine=engine, account=account,
                   sign_and_send=sign_and_send)
     logger.info("smax_keeper: initialized (engine=%s keeper=%s)",
@@ -240,7 +242,7 @@ def _check_gas_balance():
 
 def _poke(post_id: int, reason: str) -> bool:
     """Send refreshSMax(post_id). Returns True on success. Alerts on failure."""
-    from tx_signer import TxRevertedError
+    from tx_signer import TxRevertedError, TxTimeoutError
     engine, account = _state["engine"], _state["account"]
     logger.info("smax_keeper: poking refreshSMax(%d) — %s", post_id, reason)
     try:
@@ -249,6 +251,11 @@ def _poke(post_id: int, reason: str) -> bool:
         tx_hash = _state["sign_and_send"](tx)
         logger.info("smax_keeper: poke landed post=%d tx=%s", post_id, tx_hash)
         return True
+    except TxTimeoutError as e:  # patch_tx_fee_headroom
+        logger.warning("smax_keeper: poke UNCONFIRMED post=%d tx=%s — not re-poking this cycle",
+                       post_id, e.tx_hash)
+        _alert_poke_failed(post_id, f"unconfirmed after {e.timeout:g}s (tx={e.tx_hash})")
+        return False
     except TxRevertedError as e:
         logger.error("smax_keeper: poke REVERTED post=%d tx=%s", post_id, e.tx_hash)
         _alert_poke_failed(post_id, f"reverted (tx={e.tx_hash})")
