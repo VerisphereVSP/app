@@ -156,8 +156,13 @@ def poll_once(db_session_factory) -> None:
     settled = failed = 0
     for pid in pending[:MAX_PER_CYCLE]:
         try:
+            # patch_tx_fee_headroom: a send from the previous cycle may have landed late —
+            # re-read before resending so an already-settled post is skipped, not reverted.
+            if engine.functions.getLastSnapshotEpoch(pid).call() >= current_epoch:
+                logger.info("settle_keeper: post=%d already at epoch %d — skipped", pid, current_epoch)
+                continue
             tx = engine.functions.updatePost(pid).build_transaction({"from": sk._state["account"].address})
-            tx_hash = sign_and_send(tx)
+            tx_hash = sign_and_send(tx)  # the keeper signer raises on a receipt timeout (patch_tx_fee_headroom)
             settled += 1
             logger.info("settle_keeper: settled post=%d tx=%s", pid, tx_hash)
         except Exception as e:
@@ -167,7 +172,7 @@ def poll_once(db_session_factory) -> None:
     _stats["passes"] += 1
     _stats["settled"] += settled
     _stats["failed"] += failed
-    if failed == 0 and len(pending) <= MAX_PER_CYCLE:
+    if failed == 0 and len(pending) <= MAX_PER_CYCLE:  # any failure => the pass is retried next cycle
         _last_pass_epoch = current_epoch
     logger.info("settle_keeper: epoch %d pass done — settled=%d failed=%d", current_epoch, settled, failed)
     _record_pass(db_session_factory, current_epoch, settled, failed, max(0, len(pending) - MAX_PER_CYCLE))

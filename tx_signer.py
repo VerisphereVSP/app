@@ -20,8 +20,29 @@ handling) so importing this module pulls no heavy deps — matching the original
 modules' inline `from web3.exceptions import TimeExhausted`.
 """
 import logging
+import os
 
 _module_logger = logging.getLogger(__name__)
+
+# patch_tx_fee_headroom: a transaction priced at exactly the last block's base fee stops
+# being includable the moment the base fee ticks up, and the node drops it after a while
+# (the prod keepers lost every send on 2026-11-11 that way: maxFeePerGas = baseFee + 1.5x a
+# 150-wei priority suggestion). Price the EIP-1559 way — twice the base fee of headroom plus
+# a priority floor — and let callers that must know a send landed treat a receipt timeout as
+# the failure it is (on_timeout="raise").
+TX_BASE_FEE_HEADROOM = 2
+TX_PRIORITY_FLOOR_WEI = int(float(os.getenv("TX_PRIORITY_FLOOR_GWEI", "1")) * 1_000_000_000)
+
+
+class TxTimeoutError(Exception):
+    """patch_tx_fee_headroom: raised by sign_and_send(on_timeout="raise") when no receipt
+    arrived within receipt_timeout. The tx may still land later; callers re-check chain
+    state before resending. Carries tx_hash like TxRevertedError."""
+
+    def __init__(self, tx_hash: str, timeout: float = 0):
+        self.tx_hash = tx_hash
+        self.timeout = timeout
+        super().__init__(f"no receipt within {timeout:g}s (tx_hash={tx_hash})")
 
 
 class TxRevertedError(Exception):
@@ -142,7 +163,7 @@ def build_w3(rpc_urls, *, conn_err_msg="Web3 RPC not connected", require_connect
 
 
 def make_sign_and_send(*, account, w3, receipt_timeout, gas_estimate_fallback,
-                       logger=None, label="sign_and_send"):
+                       logger=None, label="sign_and_send", on_timeout="return"):
     """Return a sign_and_send(tx) bound to `account` / `w3` with the given receipt
     timeout and gas-estimate-failure policy.
 
@@ -151,7 +172,14 @@ def make_sign_and_send(*, account, w3, receipt_timeout, gas_estimate_fallback,
                   (mm_wallet behavior: 250_000)
         - None -> on estimate_gas failure, raise TxRevertedError and do NOT
                   broadcast (treasury_wallet behavior)
+      on_timeout (patch_tx_fee_headroom):
+        - "return" -> no receipt within receipt_timeout: warn and return the hash
+                      (relay / mm / treasury: a watcher resolves pending hashes)
+        - "raise"  -> raise TxTimeoutError(hash) instead (keepers: a send that did
+                      not land is a failure to retry, never a success to record)
     """
+    if on_timeout not in ("return", "raise"):
+        raise ValueError(f"on_timeout must be 'return' or 'raise', got {on_timeout!r}")
     log = logger or _module_logger
 
     def sign_and_send(tx: dict) -> str:
@@ -162,12 +190,14 @@ def make_sign_and_send(*, account, w3, receipt_timeout, gas_estimate_fallback,
         # doesn't surface a base fee / priority fee.
         try:
             base_fee = w3.eth.get_block("latest").baseFeePerGas
-            priority = w3.eth.max_priority_fee * 150 // 100
+            # patch_tx_fee_headroom: priority floored, ceiling = 2x base + priority
+            priority = max(w3.eth.max_priority_fee * 150 // 100, TX_PRIORITY_FLOOR_WEI)
             tx["type"] = 2
-            tx["maxFeePerGas"] = base_fee + priority
+            tx["maxFeePerGas"] = TX_BASE_FEE_HEADROOM * base_fee + priority
             tx["maxPriorityFeePerGas"] = priority
         except Exception:
-            tx["gasPrice"] = w3.eth.gas_price * 120 // 100
+            gp = w3.eth.gas_price
+            tx["gasPrice"] = max(gp * 120 // 100, gp + TX_PRIORITY_FLOOR_WEI)  # patch_tx_fee_headroom
 
         tx["nonce"] = w3.eth.get_transaction_count(account.address, "pending")
         tx["chainId"] = w3.eth.chain_id
@@ -205,6 +235,10 @@ def make_sign_and_send(*, account, w3, receipt_timeout, gas_estimate_fallback,
         try:
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=receipt_timeout)
         except TimeExhausted:
+            if on_timeout == "raise":  # patch_tx_fee_headroom
+                log.warning("%s: no receipt for %s within %ss — not counted as landed",
+                            label, _canonical, receipt_timeout)
+                raise TxTimeoutError(_canonical, receipt_timeout)
             log.warning(
                 "%s: receipt timeout for %s; returning hash anyway",
                 label, _canonical,
