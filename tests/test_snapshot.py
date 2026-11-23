@@ -78,7 +78,7 @@ class TestSnapshotJson:
         assert d["band"] == "Mostly supported" and d["support_pct"] == 72 and d["verity_score"] == 44.0
         assert d["total_stake"] == 5840.0 and d["stake_line"] == "72 % of stake backs this claim"
         assert d["share_url"] == "https://app.verisphere.co/c/142"
-        assert d["card_url"] == "https://app.verisphere.co/api/claims/142/card.png"
+        assert d["card_url"] == f"https://app.verisphere.co/api/claims/142/card.png?v={d['state_v']}" and len(d["state_v"]) == 10  # patch_card_fresh
         assert d["app_url"] == "https://app.verisphere.co/claims?post=142"
         # patch_snapshot_invite: the text form leads with the invitation question, quotes the claim, states the
         # standing, and ends with the call + link
@@ -86,8 +86,8 @@ class TestSnapshotJson:
         assert d["share_text"] == ("“Regular coffee consumption is associated with a lower risk of stroke.” — 72 % of stake on Verisphere backs this claim.\n"
                                    "Agree? Support it. Disagree? Challenge it.\nhttps://app.verisphere.co/c/142")
         assert d["standing"] == "72 % of stake on Verisphere backs it"
-        assert d["card_jpg_url"] == "https://app.verisphere.co/api/claims/142/card.jpg"
-        assert d["preview_url"] == "https://app.verisphere.co/api/claims/142/preview.jpg"
+        assert d["card_jpg_url"] == f"https://app.verisphere.co/api/claims/142/card.jpg?v={d['state_v']}"
+        assert d["preview_url"] == f"https://app.verisphere.co/api/claims/142/preview.jpg?v={d['state_v']}"
         assert d["invite_question"] == "Agree? Support it. Disagree? Challenge it." and d["invite_call"] == "Take a side"
         assert d["invite_line"] == "Agree? Support it. Disagree? Challenge it. app.verisphere.co/c/142"
         assert d["next_settlement_at"].endswith("T00:00:00Z")
@@ -108,6 +108,20 @@ class TestSnapshotJson:
             words = " ".join(str(d[k]) for k in ("band", "stake_line", "share_text", "invite_line")).lower()
             for banned in ("true", "false", "price", "value", "invest"):
                 assert banned not in words, (pid, banned)
+
+    def test_payoff_line_only_when_asked_and_above_the_link(self, client):
+        """patch_share_payoff: ?payoff=1 adds one line above the link; without it the text is unchanged (the extension's)."""
+        plain = client.get("/api/claims/142/snapshot").json()
+        asked = client.get("/api/claims/142/snapshot?payoff=1").json()
+        assert snapshot.PAYOFF_LINE == "Your stake on the winning side earns."
+        assert snapshot.PAYOFF_LINE not in plain["share_text"]
+        lines = asked["share_text"].split("\n")
+        assert lines[-2] == snapshot.PAYOFF_LINE and lines[-1] == asked["share_url"] and len(lines) == 4
+        assert asked["share_text"].replace(snapshot.PAYOFF_LINE + "\n", "") == plain["share_text"]
+        for banned in ("true", "false", "right side", "price", "value", "invest"):
+            assert banned not in asked["share_text"].lower(), banned
+        none = client.get("/api/claims/5/snapshot?payoff=1").json()["share_text"].split("\n")
+        assert none[-2] == snapshot.PAYOFF_LINE and none[-3] == "No one has taken a side yet."
 
     def test_contested_with_stake_gets_the_same_symmetric_line(self):
         assert snapshot.invite_for("neutral", 55) == ("Agree? Support it. Disagree? Challenge it.", "Take a side")
@@ -133,6 +147,21 @@ class TestCard:
         monkeypatch.setattr(snapshot, "render_card", lambda snap: calls.append(1) or b"x")
         r2 = client.get("/api/claims/142/card.png")
         assert r2.content == r.content and calls == []  # served from the 60 s cache
+
+    def test_a_changed_claim_gets_a_new_url_and_a_new_card_at_once(self, client, monkeypatch):
+        """patch_card_fresh: the stake moved, so the image URL changes (caches downstream miss) and the server redraws
+        inside the 60 s; an unchanged claim keeps its URL and its cached card."""
+        before = client.get("/api/claims/142/snapshot").json()
+        first = client.get("/api/claims/142/card.png").content
+        assert client.get("/api/claims/142/snapshot").json()["card_url"] == before["card_url"]
+        monkeypatch.setitem(POSTS, 142, {**POSTS[142], "challenge_total": 2630.0, "effective_vs": 23.1})
+        after = client.get("/api/claims/142/snapshot").json()
+        assert after["state_v"] != before["state_v"] and after["card_url"] != before["card_url"]
+        assert after["preview_url"] != before["preview_url"] and after["card_jpg_url"] != before["card_jpg_url"]
+        assert after["share_url"] == before["share_url"]  # the link people pass around never changes
+        second = client.get("/api/claims/142/card.png").content
+        assert second != first  # redrawn at once, not after the TTL
+        assert client.get("/api/claims/142/card.png?v=" + before["state_v"]).content == second  # an old URL still gets the current card
 
     def test_jpeg_card_for_previews(self, client):  # patch_share_chat_text
         from PIL import Image
@@ -203,10 +232,10 @@ class TestSharePage:
         r = client.get("/c/142", headers={"x-forwarded-proto": "https", "x-forwarded-host": "app.verisphere.co"})
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         h = r.text
-        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/preview.jpg">' in h  # patch_share_preview
-        assert '<meta property="og:image:type" content="image/jpeg">' in h and 'twitter:image" content="https://app.verisphere.co/api/claims/142/preview.jpg"' in h
-        assert '<img src="https://app.verisphere.co/api/claims/142/card.png"' in h  # the page itself shows the full card
-        assert '<img src="https://app.verisphere.co/api/claims/142/card.png"' in h  # the page itself keeps the PNG
+        assert '<meta property="og:image" content="https://app.verisphere.co/api/claims/142/preview.jpg?v=' in h  # patch_share_preview
+        assert '<meta property="og:image:type" content="image/jpeg">' in h and 'twitter:image" content="https://app.verisphere.co/api/claims/142/preview.jpg?v=' in h
+        assert '<img src="https://app.verisphere.co/api/claims/142/card.png?v=' in h  # the page itself shows the full card
+        assert '<img src="https://app.verisphere.co/api/claims/142/card.png?v=' in h  # the page itself keeps the PNG
         assert '<meta name="twitter:card" content="summary_large_image">' in h
         assert 'og:title" content="Regular coffee consumption' in h
         assert 'href="https://app.verisphere.co/claims?post=142"' in h
