@@ -3,7 +3,7 @@ Verisphere Snapshot: a claim's shareable snapshot. (patch_snapshot_naming: the w
 an existing product of that name verifies snapshots; user-facing wording is "Verisphere Snapshot" / "Snapshot".)
 
   GET /api/claims/{post_id}/snapshot   JSON — text, Verity Score, band, stake split, settlement times, urls
-  GET /api/claims/{post_id}/card.png   PNG 1200×630 (Open Graph size), rendered server-side, cached 60 s
+  GET /api/claims/{post_id}/card.png   PNG 1200×630 (Open Graph size), rendered server-side, cached 60 s while the claim is unchanged
   GET /c/{post_id}                     the share page: Open Graph / Twitter meta pointing at the card, the card
                                        itself, and a link into the app — what a pasted link unfurls into
 
@@ -14,6 +14,7 @@ no browser. Reads come from the indexed tables the claim summary already uses (n
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -57,6 +58,11 @@ _SCRIPT = Path(__file__).resolve().parent / "assets" / "snapshot.js"  # patch_sh
 # share page above the buttons, in the app's Start sheet and at the top of the guide.
 THE_RULE = ("The score is a credibility signal, not a verdict and not a bet: it is what people are willing to stake behind each side. "
             "Positions earn or lose VSP over time by the claim's score — from the protocol, never from the other side.")  # patch_not_a_bet
+
+# patch_share_payoff (Lavey 11-22): one line in the share text saying what staking does, placed above the link. Only when
+# the caller asks (?payoff=1 — the app's Share menu does): the extension reads this endpoint without it, and its store
+# listing carries no such wording. The wording is Lavey's (11-23).
+PAYOFF_LINE = "Your stake on the winning side earns."
 
 HOW_IT_WORKS = (
     "Verisphere is a game of claims: people stake VSP to support or challenge them, and the stake behind each side is the score you see.",
@@ -113,7 +119,14 @@ def _public_base(request: Request) -> str:
     return f"{proto}://{host}"
 
 
-def build_snapshot(db: Session, post_id: int, base: str) -> dict:
+def state_version(text: str, vs: float, support: float, challenge: float) -> str:
+    """patch_card_fresh: a short tag for what the card shows. It rides on the image URLs (?v=…), so a browser, a chat app
+    or a mail proxy that cached the old picture fetches a new one when the stake or the score moves, and it keys the
+    server's card cache, so a changed claim is redrawn at once instead of after the 60 s."""
+    return hashlib.sha1(f"{text}|{round(vs, 1)}|{round(support, 4)}|{round(challenge, 4)}".encode()).hexdigest()[:10]
+
+
+def build_snapshot(db: Session, post_id: int, base: str, payoff: bool = False) -> dict:
     from chain.chain_db import get_post_info, get_claim_text
     try:
         from claim_views import _moderate_text  # admin takedowns + content filter, as the claim summary applies them
@@ -128,6 +141,7 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
     support = float(info.get("support_total") or 0.0)
     challenge = float(info.get("challenge_total") or 0.0)
     band, role = band_for(vs)
+    ver = state_version(text, vs, support, challenge)  # patch_card_fresh
     now = datetime.now(timezone.utc)
     pct = support_pct(support, challenge)
     stake_line = (f"{pct} % of stake backs this claim" if pct is not None and vs >= 0
@@ -150,7 +164,7 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
                       else f"{100 - pct} % of stake on Verisphere challenges this claim" if pct is not None and role == "challenge"
                       else f"stake on Verisphere is split {pct} / {100 - pct} on this claim" if pct is not None
                       else "no stake on Verisphere on this claim so far")
-    share_text = f"\u201c{text}\u201d \u2014 {standing_claim}.\n{question}\n{share_url}"
+    share_text = f"\u201c{text}\u201d \u2014 {standing_claim}.\n{question}\n{PAYOFF_LINE + chr(10) if payoff else ''}{share_url}"  # patch_share_payoff
     return {
         "post_id": post_id,
         "text": text,
@@ -166,9 +180,10 @@ def build_snapshot(db: Session, post_id: int, base: str) -> dict:
         "snapshot_at": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "next_settlement_at": next_settlement(now).isoformat().replace("+00:00", "Z"),
         "share_url": share_url,
-        "card_url": f"{base}/api/claims/{post_id}/card.png",
-        "card_jpg_url": f"{base}/api/claims/{post_id}/card.jpg",  # patch_share_chat_text: the full card as JPEG
-        "preview_url": f"{base}/api/claims/{post_id}/preview.jpg",  # patch_share_preview: what link previews point at
+        "state_v": ver,  # patch_card_fresh
+        "card_url": f"{base}/api/claims/{post_id}/card.png?v={ver}",
+        "card_jpg_url": f"{base}/api/claims/{post_id}/card.jpg?v={ver}",  # patch_share_chat_text: the full card as JPEG
+        "preview_url": f"{base}/api/claims/{post_id}/preview.jpg?v={ver}",  # patch_share_preview: what link previews point at
         "standing": standing_cap,
         "app_url": f"{base}/claims?post={post_id}",
         "invite_question": question,
@@ -403,18 +418,18 @@ def to_jpeg(png: bytes, quality: int = 86) -> bytes:
 def _cached_card(db: Session, post_id: int, base: str, fmt: str = "png") -> bytes:
     now = time.time()
     key = post_id if fmt == "png" else (post_id, fmt)
+    snap = build_snapshot(db, post_id, base)  # patch_card_fresh: read the claim first; the cache holds only while it is unchanged
     with _card_lock:
         hit = _card_cache.get(key)
-        if hit and now - hit[0] < CARD_TTL_SEC:
+        if hit and now - hit[0] < CARD_TTL_SEC and hit[2] == snap["state_v"]:
             return hit[1]
-    snap = build_snapshot(db, post_id, base)
     data = to_jpeg(render_preview(snap)) if fmt == "preview" else render_card(snap)  # patch_share_preview
     if fmt == "jpg":
         data = to_jpeg(data)
     with _card_lock:
         if len(_card_cache) >= _CARD_CACHE_MAX:
             _card_cache.clear()
-        _card_cache[key] = (now, data)
+        _card_cache[key] = (now, data, snap["state_v"])
     return data
 
 
@@ -491,8 +506,8 @@ def share_script():
 
 
 @router.get("/api/claims/{post_id}/snapshot")
-def claim_snapshot(post_id: int, request: Request, db: Session = Depends(get_db)):
-    return build_snapshot(db, post_id, _public_base(request))
+def claim_snapshot(post_id: int, request: Request, payoff: int = 0, db: Session = Depends(get_db)):
+    return build_snapshot(db, post_id, _public_base(request), payoff=bool(payoff))  # patch_share_payoff
 
 
 @router.api_route("/api/claims/{post_id}/card.png", methods=["GET", "HEAD"])
