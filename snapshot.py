@@ -61,8 +61,8 @@ THE_RULE = ("The score is a credibility signal, not a verdict and not a bet: it 
 
 # patch_share_payoff (Lavey 11-22): one line in the share text saying what staking does, placed above the link. Only when
 # the caller asks (?payoff=1 — the app's Share menu does): the extension reads this endpoint without it, and its store
-# listing carries no such wording. The wording is Lavey's (11-23).
-PAYOFF_LINE = "Your stake on the winning side earns."
+# listing carries no such wording. The wording is Lavey's (11-24).
+PAYOFF_LINE = "Back the truth. Profit from being right."
 
 HOW_IT_WORKS = (
     "Verisphere is a game of claims: people stake VSP to support or challenge them, and the stake behind each side is the score you see.",
