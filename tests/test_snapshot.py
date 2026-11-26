@@ -113,7 +113,7 @@ class TestSnapshotJson:
         """patch_share_payoff: ?payoff=1 adds one line above the link; without it the text is unchanged (the extension's)."""
         plain = client.get("/api/claims/142/snapshot").json()
         asked = client.get("/api/claims/142/snapshot?payoff=1").json()
-        assert snapshot.PAYOFF_LINE == "Your stake on the winning side earns."
+        assert snapshot.PAYOFF_LINE == "Back the truth. Profit from being right."
         assert snapshot.PAYOFF_LINE not in plain["share_text"]
         lines = asked["share_text"].split("\n")
         assert lines[-2] == snapshot.PAYOFF_LINE and lines[-1] == asked["share_url"] and len(lines) == 4
