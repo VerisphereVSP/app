@@ -119,11 +119,15 @@ def _public_base(request: Request) -> str:
     return f"{proto}://{host}"
 
 
+# patch_new_logo: the artwork revision is part of the tag, so cards cached with the old mark are redrawn and refetched.
+CARD_ART = "2"
+
+
 def state_version(text: str, vs: float, support: float, challenge: float) -> str:
     """patch_card_fresh: a short tag for what the card shows. It rides on the image URLs (?v=…), so a browser, a chat app
     or a mail proxy that cached the old picture fetches a new one when the stake or the score moves, and it keys the
     server's card cache, so a changed claim is redrawn at once instead of after the 60 s."""
-    return hashlib.sha1(f"{text}|{round(vs, 1)}|{round(support, 4)}|{round(challenge, 4)}".encode()).hexdigest()[:10]
+    return hashlib.sha1(f"{CARD_ART}|{text}|{round(vs, 1)}|{round(support, 4)}|{round(challenge, 4)}".encode()).hexdigest()[:10]
 
 
 def build_snapshot(db: Session, post_id: int, base: str, payoff: bool = False) -> dict:
