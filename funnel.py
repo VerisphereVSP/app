@@ -16,14 +16,24 @@ Server-side counts (no round trip): the share page (share_view, or share_preview
 bot), a side taken on the share page (side_taken), an invitation issued (invite_issued) and redeemed (invite_redeemed).
 Browser-side counts, from the Start sheet: back_tap (the share page's button), start_open, start_wallet (a wallet is
 connected — step 2 reached), start_funded (VSP in hand — step 3 reached), start_staked, start_skip.
+
+patch_visits — how many visits, and from where, under the same rule (integers per day, nothing about the visitor):
+  app_visit    the app was opened; the browser posts it once per browser session (a flag in sessionStorage, never sent)
+  www_visit    the landing page was opened; it loads GET /api/funnel/px.gif?step=www_visit, a 1x1 image
+  sources      a link Verisphere hands out may carry ?src=<tag> (fb, x, lw, …). The tag is counted per day in
+               funnel_src_daily when the share page, the app or the landing page is opened with it. It names a post,
+               not a person. GET /api/funnel reports them under "sources".
 """
 from __future__ import annotations
 
+import base64
 import logging
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
@@ -52,16 +62,31 @@ STEPS: tuple[str, ...] = (
     "start_claim_ok",      # the VSP moved
     "start_claim_fail",    # it did not (shown with a retry)
     "pending_banner_tap",  # "You have an invitation waiting" was taken up later
+    "app_visit",   # patch_visits: the app was opened (once per browser session)
+    "www_visit",   # patch_visits: the landing page was opened
 )
 BROWSER_STEPS = frozenset({"back_tap", "start_open", "start_wallet", "start_funded", "start_staked", "start_skip", "ext_install_tap",
-                           "start_claim_shown", "start_claim_ok", "start_claim_fail", "pending_banner_tap"})
+                           "start_claim_shown", "start_claim_ok", "start_claim_fail", "pending_banner_tap", "app_visit"})
+PIXEL_STEPS = frozenset({"www_visit"})  # patch_visits: steps a page may report by loading the 1x1 image
+SRC_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")  # a source tag: short, lower case, no free text
+MAX_SRC_PER_DAY = 60  # distinct tags counted in one day; beyond that new ones are dropped, so the table cannot be flooded
+_PIXEL = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
 PREVIEW_BOTS = ("whatsapp", "facebookexternalhit", "facebot", "twitterbot", "slackbot", "telegrambot", "discordbot",
                 "linkedinbot", "skypeuripreview", "signal", "imessage", "googlebot", "bingbot", "applebot", "viber")
+# patch_visits: share_view was counting every crawler and script that is not a named preview bot (136 "views" in two
+# weeks against 2 sides taken). Anything that calls itself a bot, crawler or script, or sends no user agent at all, is
+# not a person. Only this decision is made from the user agent; it is never stored.
+AUTOMATED = ("bot", "crawl", "spider", "slurp", "scrape", "preview", "fetch", "monitor", "headless", "python-", "curl/",
+             "wget", "go-http-client", "okhttp", "java/", "libwww", "httpclient", "axios", "node-fetch", "postman",
+             "feed", "scan", "uptime", "lighthouse", "pagespeed", "embed", "metainspector", "iframely", "bytespider",
+             "gptbot", "claudebot", "ccbot", "perplexity", "amazonbot", "petalbot", "yandex", "baidu", "duckduck", "semrush", "ahrefs")
 
 
 def is_preview_bot(user_agent: str | None) -> bool:
-    ua = (user_agent or "").lower()
-    return any(b in ua for b in PREVIEW_BOTS)
+    ua = (user_agent or "").strip().lower()
+    if not ua:
+        return True
+    return any(b in ua for b in PREVIEW_BOTS) or any(b in ua for b in AUTOMATED)
 
 
 def count(db: Session, step: str, n: int = 1) -> None:
@@ -79,6 +104,34 @@ def count(db: Session, step: str, n: int = 1) -> None:
         except Exception:
             pass
         log.warning("funnel count failed for %s: %s", step, e)
+
+
+def clean_src(src: str | None) -> str | None:
+    s = (src or "").strip().lower()
+    return s if SRC_RE.match(s) else None
+
+
+def count_src(db: Session, src: str | None) -> None:
+    """Add one to today's row for a source tag. Never raises; a tag that is not a tag is ignored."""
+    s = clean_src(src)
+    if not s:
+        return
+    try:
+        known = db.execute(sql_text("SELECT 1 FROM funnel_src_daily WHERE day = CURRENT_DATE AND src = :s"), {"s": s}).fetchone()
+        if not known:
+            n = db.execute(sql_text("SELECT count(*) FROM funnel_src_daily WHERE day = CURRENT_DATE")).scalar() or 0
+            if n >= MAX_SRC_PER_DAY:
+                return
+        db.execute(sql_text(
+            "INSERT INTO funnel_src_daily (day, src, n) VALUES (CURRENT_DATE, :s, 1) "
+            "ON CONFLICT (day, src) DO UPDATE SET n = funnel_src_daily.n + 1"), {"s": s})
+        db.commit()
+    except Exception as e:  # pragma: no cover
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        log.warning("funnel source count failed for %s: %s", s, e)
 
 
 def _balance(address: str) -> float | None:
@@ -150,6 +203,7 @@ def _new_stakers_by_day(db: Session, since: date) -> list[dict]:
 
 class StepIn(BaseModel):
     step: str
+    src: str | None = None  # patch_visits: the ?src= tag the app was opened with, sent with app_visit only
 
 
 @router.post("/api/funnel", status_code=204)
@@ -157,7 +211,19 @@ def funnel_post(body: StepIn, db: Session = Depends(get_db)):
     if body.step not in BROWSER_STEPS:
         raise HTTPException(400, "unknown step")
     count(db, body.step)
+    if body.step == "app_visit":
+        count_src(db, body.src)
     return None
+
+
+@router.get("/api/funnel/px.gif")
+def funnel_pixel(request: Request, step: str = Query(""), src: str | None = Query(None), db: Session = Depends(get_db)):
+    """patch_visits: a 1x1 image a page outside the app (the landing page) loads to be counted. Link-preview bots and
+    crawlers are not counted. The response is the same whatever was asked, so it tells a caller nothing."""
+    if step in PIXEL_STEPS and not is_preview_bot(request.headers.get("user-agent")):
+        count(db, step)
+        count_src(db, src)
+    return Response(content=_PIXEL, media_type="image/gif", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/funnel")
@@ -189,6 +255,16 @@ def funnel_get(days: int = Query(14, ge=1, le=90), wallets: int = Query(0, ge=0,
             "view_to_staked": ratio("start_staked", "share_view"),
         },
     }
+    try:  # patch_visits: visits by source tag
+        srows = db.execute(sql_text("SELECT day, src, n FROM funnel_src_daily WHERE day >= :since ORDER BY day"), {"since": since}).fetchall()
+    except Exception:
+        srows = []
+    src_totals: dict[str, int] = {}
+    for _day, src, n in srows:
+        src_totals[src] = src_totals.get(src, 0) + int(n)
+    report["sources"] = {"totals": dict(sorted(src_totals.items(), key=lambda kv: -kv[1])),
+                         "by_day": [{"day": str(d)[:10], "src": s, "n": int(n)} for d, s, n in srows]}
+    report["visits"] = {"app": totals["app_visit"], "www": totals["www_visit"], "share_pages": totals["share_view"]}
     if wallets:  # patch_funnel_2: opt-in, since it reads the chain once per sponsored wallet
         sp = _sponsored_wallets(db)
         report["wallets"] = {

@@ -39,7 +39,7 @@ def stub_reads(monkeypatch):
 def harness():
     eng = create_engine("sqlite://", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
     with eng.begin() as c:
-        for m in ("340_claim_opinion_daily.sql", "360_funnel_daily.sql"):
+        for m in ("340_claim_opinion_daily.sql", "360_funnel_daily.sql", "380_funnel_src_daily.sql"):
             ddl = (ROOT / "ops" / "compose" / "migrations" / m).read_text()
             c.execute(text("\n".join(l for l in ddl.splitlines() if not l.startswith("--"))))
     SessionLocal = sessionmaker(bind=eng, future=True)
@@ -100,6 +100,89 @@ class TestCounts:
             assert forbidden not in ddl.replace("-- ", "").split("create table")[1]
 
 
+def src_rows(SessionLocal):
+    with SessionLocal() as db:
+        return {r[0]: r[1] for r in db.execute(text("SELECT src, n FROM funnel_src_daily")).fetchall()}
+
+
+class TestVisits:
+    """patch_visits: visits to the app and the landing page, and the source tag on a link, as daily integers."""
+
+    def test_app_visit_is_a_browser_step_and_carries_its_source(self, harness):
+        S, c = harness
+        assert c.post("/api/funnel", json={"step": "app_visit"}).status_code == 204
+        assert c.post("/api/funnel", json={"step": "app_visit", "src": "fb"}).status_code == 204
+        assert c.post("/api/funnel", json={"step": "app_visit", "src": "FB"}).status_code == 204       # case folded
+        assert c.post("/api/funnel", json={"step": "start_open", "src": "fb"}).status_code == 204      # a source rides only on a visit
+        assert rows(S) == {"app_visit": 3, "start_open": 1}
+        assert src_rows(S) == {"fb": 2}
+        assert c.post("/api/funnel", json={"step": "www_visit"}).status_code == 400                    # the landing page uses the image
+
+    def test_landing_page_image_counts_people_not_bots(self, harness):
+        S, c = harness
+        r = c.get("/api/funnel/px.gif?step=www_visit&src=x", headers={"user-agent": "Mozilla/5.0"})
+        assert r.status_code == 200 and r.headers["content-type"] == "image/gif" and r.headers["cache-control"] == "no-store"
+        assert r.content[:6] == b"GIF89a"
+        assert c.get("/api/funnel/px.gif?step=www_visit", headers={"user-agent": "Googlebot/2.1"}).status_code == 200
+        assert c.get("/api/funnel/px.gif?step=start_staked").content == r.content   # any other step: same image, nothing counted
+        assert c.get("/api/funnel/px.gif").status_code == 200
+        assert rows(S) == {"www_visit": 1}
+        assert src_rows(S) == {"x": 1}
+
+    def test_scripts_and_crawlers_are_not_people(self, harness):
+        """patch_visits: only a browser's user agent counts as a view; a missing one, or anything that names itself a
+        bot, crawler or script, counts as a preview."""
+        assert not funnel.is_preview_bot("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
+        assert not funnel.is_preview_bot("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Version/18.1 Mobile/15E148 Safari/604.1")
+        for ua in (None, "", "  ", "curl/8.5.0", "python-requests/2.32", "Go-http-client/2.0", "Mozilla/5.0 (compatible; AhrefsBot/7.0)",
+                   "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2)", "HeadlessChrome/120", "Wget/1.21",
+                   "Twitterbot/1.0", "facebookexternalhit/1.1", "Mozilla/5.0 (compatible; SemrushBot/7)", "node-fetch/1.0"):
+            assert funnel.is_preview_bot(ua), ua
+        S, c = harness
+        c.get("/c/142", headers={"user-agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/131 Safari/537.36"})
+        c.get("/c/142", headers={"user-agent": "python-requests/2.32"})
+        c.get("/c/142", headers={"user-agent": "Mozilla/5.0 (compatible; AhrefsBot/7.0)"})
+        assert rows(S) == {"share_view": 1, "share_preview": 2}
+
+    def test_share_page_counts_its_source_for_people_only(self, harness):
+        S, c = harness
+        assert c.get("/c/142?src=lw", headers={"user-agent": "Mozilla/5.0"}).status_code == 200
+        assert c.get("/c/142?src=lw", headers={"user-agent": "Twitterbot/1.0"}).status_code == 200
+        assert c.get("/c/142", headers={"user-agent": "Mozilla/5.0"}).status_code == 200
+        assert rows(S) == {"share_view": 2, "share_preview": 1}
+        assert src_rows(S) == {"lw": 1}
+
+    def test_a_source_is_a_short_tag_and_nothing_else(self, harness):
+        S, c = harness
+        for bad in ("", " ", "a b", "<script>", "x" * 25, "-lead", "ünï", "a@b.co", "0x5B43f0c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5862b"):
+            c.post("/api/funnel", json={"step": "app_visit", "src": bad})
+        assert src_rows(S) == {}
+        assert funnel.clean_src("  Fb_Post-1 ") == "fb_post-1"
+        with S() as db:
+            assert [r[1] for r in db.execute(text("PRAGMA table_info(funnel_src_daily)")).fetchall()] == ["day", "src", "n"]
+        ddl = (ROOT / "ops" / "compose" / "migrations" / "380_funnel_src_daily.sql").read_text().lower()
+        for forbidden in ("address", "wallet", "ip", "agent", "cookie", "visitor"):
+            assert forbidden not in ddl.replace("-- ", "").split("create table")[1]
+
+    def test_distinct_sources_per_day_are_capped(self, harness, monkeypatch):
+        S, c = harness
+        monkeypatch.setattr(funnel, "MAX_SRC_PER_DAY", 3)
+        for s in ("a", "b", "c", "d", "e", "a"):
+            c.post("/api/funnel", json={"step": "app_visit", "src": s})
+        assert src_rows(S) == {"a": 2, "b": 1, "c": 1}
+
+    def test_report_carries_visits_and_sources(self, harness):
+        S, c = harness
+        c.post("/api/funnel", json={"step": "app_visit", "src": "fb"}); c.post("/api/funnel", json={"step": "app_visit"})
+        c.get("/api/funnel/px.gif?step=www_visit", headers={"user-agent": "Mozilla/5.0"})
+        c.get("/c/142?src=x", headers={"user-agent": "Mozilla/5.0"})
+        d = c.get("/api/funnel?days=7").json()
+        assert d["visits"] == {"app": 2, "www": 1, "share_pages": 1}
+        assert d["sources"]["totals"] == {"fb": 1, "x": 1}
+        assert {(r["src"], r["n"]) for r in d["sources"]["by_day"]} == {("fb", 1), ("x", 1)}
+        assert d["totals"]["app_visit"] == 2 and "app_visit" in d["steps"]
+
+
 class TestReport:
     def test_report_shape_and_conversions(self, harness):
         S, c = harness
@@ -128,7 +211,7 @@ class TestWiring:
     def test_preview_bots(self):
         assert funnel.is_preview_bot("WhatsApp/2.23.20.0 A") and funnel.is_preview_bot("facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
         assert funnel.is_preview_bot("TelegramBot (like TwitterBot)") and not funnel.is_preview_bot("Mozilla/5.0 (Windows NT 10.0) Chrome/130")
-        assert not funnel.is_preview_bot(None)
+        assert funnel.is_preview_bot(None)  # patch_visits: no user agent at all is a script, not a person
 
     def test_share_script_counts_the_button_once(self):
         js = (ROOT / "assets" / "snapshot.js").read_text()

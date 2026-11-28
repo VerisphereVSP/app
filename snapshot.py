@@ -31,7 +31,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
 from db import get_db
-from funnel import count as funnel_count, is_preview_bot  # patch_funnel
+from funnel import count as funnel_count, count_src as funnel_count_src, is_preview_bot  # patch_funnel; patch_visits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -542,7 +542,10 @@ def share_page(post_id: int, request: Request, db: Session = Depends(get_db)):
     footnote link — people who did not take a side still need an obvious door."""
     snap = build_snapshot(db, post_id, _public_base(request))
     if request.method == "GET":  # patch_funnel: a person, or a chat app unfurling the link — counted apart, nothing else kept
-        funnel_count(db, "share_preview" if is_preview_bot(request.headers.get("user-agent")) else "share_view")
+        _bot = is_preview_bot(request.headers.get("user-agent"))
+        funnel_count(db, "share_preview" if _bot else "share_view")
+        if not _bot:
+            funnel_count_src(db, request.query_params.get("src"))  # patch_visits: which post the reader came from
     title = escape(snap["text"][:200])
     desc = escape(f"{snap['band']} — {snap['stake_line']} · Verity Score {snap['verity_score']:+.0f} · Verisphere")
     card = escape(snap["card_url"]); share = escape(snap["share_url"]); app_url = escape(snap["app_url"])
